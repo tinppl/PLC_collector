@@ -1,7 +1,7 @@
 """수집 엔진
 
 설정 파일(JSON/YAML)만 바꾸면 '무엇을(tags) / 어디서(devices) / 언제(jobs)'가 바뀐다.
-새 프로토콜은 make_client()에 driver를 추가하면 된다 (예: LS XGT 전용 프로토콜).
+지원 프로토콜(driver): modbus_tcp, xgt(LS XGT 전용). 새 프로토콜은 DRIVERS 와 make_client()에 추가하면 된다.
 """
 import copy
 import csv
@@ -14,7 +14,11 @@ from collections import namedtuple
 from datetime import datetime
 
 from modbus_tcp import ModbusTcpClient
-from tagcodec import BIT_AREAS, Tag
+from tagcodec import Tag
+from xgt import XgtClient
+
+DRIVERS = ("modbus_tcp", "xgt")
+DEFAULT_PORT = {"modbus_tcp": 502, "xgt": 2004}
 
 Reading = namedtuple("Reading", "value quality")   # quality: OK / RANGE / COMM
 _print_lock = threading.Lock()
@@ -104,19 +108,21 @@ def build_config(raw):
         for n in names:
             if not _NAME_RE.match(str(n)):
                 raise ConfigError(f"{kind} 이름 '{n}'에 공백이나 , \" ' / \\ : * ? < > | 문자는 쓸 수 없습니다")
-    try:
-        cfg["_tags"] = {n: Tag(n, s) for n, s in raw_tags.items()}
-    except (KeyError, ValueError, TypeError) as e:
-        raise ConfigError(f"변수 설정 오류: {e}")
-
-    for n, t in cfg["_tags"].items():
-        if t.device not in cfg["devices"]:
-            raise ConfigError(f"변수 '{n}'가 등록되지 않은 장치 '{t.device}'를 사용합니다")
     for n, s in cfg["devices"].items():
-        if s.get("driver", "modbus_tcp") != "modbus_tcp":
-            raise ConfigError(f"장치 '{n}': 지원하지 않는 프로토콜 '{s.get('driver')}'")
+        if s.get("driver", "modbus_tcp") not in DRIVERS:
+            raise ConfigError(f"장치 '{n}': 지원하지 않는 프로토콜 '{s.get('driver')}' (사용 가능: {', '.join(DRIVERS)})")
         if not str(s.get("host", "")).strip():
             raise ConfigError(f"장치 '{n}': 주소(host)가 없습니다")
+    tags = {}
+    for n, s in raw_tags.items():
+        try:
+            dev = s["device"]
+            if dev not in cfg["devices"]:
+                raise ConfigError(f"변수 '{n}'가 등록되지 않은 장치 '{dev}'를 사용합니다")
+            tags[n] = Tag(n, s, cfg["devices"][dev].get("driver", "modbus_tcp"))
+        except (KeyError, ValueError, TypeError) as e:
+            raise ConfigError(f"변수 '{n}' 설정 오류: {e}")
+    cfg["_tags"] = tags
     for n, s in cfg["jobs"].items():
         if s.get("type") not in ("interval", "event", "cycle"):
             raise ConfigError(f"작업 '{n}': 종류는 interval/event/cycle 중 하나여야 합니다")
@@ -142,11 +148,17 @@ def build_config(raw):
 
 
 def make_client(spec):
+    """장치 설정 -> 통신 클라이언트. 모든 클라이언트는 read(area, addr, count) / close() /
+    is_bit(area) / limits(area, gap) / trace 를 제공한다."""
     driver = spec.get("driver", "modbus_tcp")
     if driver == "modbus_tcp":
-        return ModbusTcpClient(spec["host"], spec.get("port", 502),
+        return ModbusTcpClient(spec["host"], spec.get("port", DEFAULT_PORT[driver]),
                                spec.get("unit", 1), spec.get("timeout_s", 2.0))
-    raise ConfigError(f"지원하지 않는 driver: {driver}")   # 여기에 xgt 등 추가
+    if driver == "xgt":
+        return XgtClient(spec["host"], spec.get("port", DEFAULT_PORT[driver]), spec.get("timeout_s", 2.0),
+                         cpu_info=spec.get("cpu_info", 0xA0), position=spec.get("position", 0),
+                         bcc=spec.get("bcc", "sum"), block_read=spec.get("block_read", True))
+    raise ConfigError(f"지원하지 않는 driver: {driver}")
 
 
 # --------------------------------------------------------------------------
@@ -178,8 +190,8 @@ class Reader:
             t = self.tags[n]
             groups.setdefault((t.device, t.area), []).append(t)
         for (dev, area), tags in groups.items():
-            max_gap = self.cfg["devices"][dev].get("max_gap", 4)
-            limit = 1000 if area in BIT_AREAS else 120
+            client = self._client(dev)
+            max_gap, limit = client.limits(area, self.cfg["devices"][dev].get("max_gap", 4))
             tags.sort(key=lambda t: t.address)
             blocks = []   # [start, end(exclusive), [tags]]
             for t in tags:
@@ -189,7 +201,6 @@ class Reader:
                     blocks[-1][2].append(t)
                 else:
                     blocks.append([s, e, [t]])
-            client = self._client(dev)
             failed = False
             for s, e, ts in blocks:
                 if failed:

@@ -12,7 +12,7 @@ import threading
 import time
 
 from modbus_tcp import DataStore, ModbusTcpServer
-from tagcodec import BIT_AREAS
+from xgt import XgtServer
 
 
 def sim_value(spec, t):
@@ -31,7 +31,7 @@ def sim_value(spec, t):
 
 
 def _write_tag(store, tag, value):
-    if tag.area in BIT_AREAS:
+    if tag.is_bit:
         store.set(tag.area, tag.address, [bool(value)])
     elif tag.dtype == "bool" and tag.bit is not None:
         cur = store.get(tag.area, tag.address, 1)[0]
@@ -60,9 +60,11 @@ class Simulator:
                 continue
             store = DataStore()
             bind = spec.get("sim_bind", "127.0.0.1")
-            port = int(spec.get("port", 502))
+            xgt = spec.get("driver") == "xgt"
+            port = int(spec.get("port", 2004 if xgt else 502))
             try:
-                srv = ModbusTcpServer((bind, port), store)
+                srv = XgtServer((bind, port), store, spec.get("sim_reject_block", False)) if xgt \
+                    else ModbusTcpServer((bind, port), store)
             except OSError as e:
                 self.stop()
                 raise RuntimeError(f"데모 장치 '{dname}'의 포트 {port}를 열 수 없습니다. "
@@ -70,7 +72,7 @@ class Simulator:
             srv.start()
             self.servers.append(srv)
             self.stores[dname] = store
-            self.log(f"데모 장치 '{dname}' 시작: {bind}:{port}")
+            self.log(f"데모 장치 '{dname}' 시작: {bind}:{port}" + (" (LS XGT 전용)" if xgt else ""))
         if not self.stores:
             raise RuntimeError("설정에 데모(sim) 장치가 없습니다")
         self.stop_ev.clear()

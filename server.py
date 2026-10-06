@@ -29,11 +29,12 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 
 import engine
 from engine import ConfigError, Reader, Runner, build_config, make_client
-from modbus_tcp import ModbusError, ModbusTcpClient
+from modbus_tcp import ModbusError
 from simulator import Simulator
 from tagcodec import BIT_AREAS, Tag
+from xgt import XgtError, XgtPlcError
 
-VERSION = "0.2"
+VERSION = "0.3"
 ROOT = os.path.dirname(os.path.abspath(__file__))
 WEB = os.path.join(ROOT, "web")
 DATA = os.path.join(ROOT, "data")
@@ -53,17 +54,23 @@ class ApiError(Exception):
         self.msg, self.code = msg, code
 
 
-def explain(ex):
+def explain(ex, driver="modbus_tcp"):
     """통신 예외를 현장 담당자가 이해할 수 있는 문장으로"""
     if isinstance(ex, (socket.timeout, TimeoutError)):
-        return "응답이 없습니다(시간 초과). IP 주소, 장치 전원, 케이블/네트워크, 방화벽을 확인하세요."
+        msg = "응답이 없습니다(시간 초과). IP 주소, 장치 전원, 케이블/네트워크, 방화벽을 확인하세요."
+        if driver == "xgt":
+            msg += " 포트가 XGT 전용 서비스(기본 2004)가 아닌 다른 서비스(예: Modbus 502)를 가리켜도 같은 증상이 나옵니다."
+        return msg
     if isinstance(ex, ConnectionRefusedError):
+        if driver == "xgt":
+            return ("연결이 거부되었습니다. 포트(기본 2004)와, XG5000 통신 설정에서 해당 이더넷 모듈의 "
+                    "전용 서비스(XGT 서버) 사용 여부를 확인하세요.")
         return "연결이 거부되었습니다. 포트 번호와 장치의 Modbus 서버 사용 설정을 확인하세요."
     if isinstance(ex, socket.gaierror):
         return "주소를 찾을 수 없습니다. IP 주소를 다시 확인하세요."
     if isinstance(ex, ConnectionError):
         return "연결이 끊어졌습니다. 장치가 연결을 닫았습니다."
-    if isinstance(ex, ModbusError):
+    if isinstance(ex, (ModbusError, XgtError)):
         return str(ex)
     if isinstance(ex, OSError):
         return f"네트워크 오류: {ex.strerror or ex}"
@@ -251,25 +258,40 @@ PASSWORD = None
 # --------------------------------------------------------------------------
 # API 구현
 # --------------------------------------------------------------------------
+def _trace(client):
+    t = getattr(client, "trace", None) or {}
+    return {"tx": t.get("tx", ""), "rx": t.get("rx", "")}
+
+
 def test_device(spec):
     host = str(spec.get("host", "")).strip()
     if not host:
         raise ApiError("주소(host)를 입력하세요")
+    driver = spec.get("driver", "modbus_tcp")
+    if driver not in engine.DRIVERS:
+        raise ApiError(f"지원하지 않는 프로토콜입니다: {driver}")
+    xgt = driver == "xgt"
     try:
-        port, unit = int(spec.get("port", 502)), int(spec.get("unit", 1))
-        timeout = min(float(spec.get("timeout_s", 2.0)), 5.0)
+        spec = dict(spec, host=host, port=int(spec.get("port", engine.DEFAULT_PORT[driver])),
+                    timeout_s=min(float(spec.get("timeout_s", 2.0)), 5.0))
+        if xgt:
+            spec["position"] = int(spec.get("position", 0))
+        else:
+            spec["unit"] = int(spec.get("unit", 1))
     except (TypeError, ValueError):
-        raise ApiError("포트/국번/시간 초과 값이 숫자가 아닙니다")
-    client = ModbusTcpClient(host, port, unit, timeout)
+        raise ApiError("포트/국번/모듈 위치/시간 초과 값이 숫자가 아닙니다")
+    client = make_client(spec)
+    probe = ("D", 0, 1) if xgt else ("holding", 0, 1)     # 가장 흔한 영역의 첫 주소를 한 번 읽어 본다
+    probe_name = "%DW0" if xgt else "0번 주소"
     t0 = time.time()
     try:
-        client.read("holding", 0, 1)
-        return {"ok": True, "ms": int((time.time() - t0) * 1000), "message": "연결되었습니다."}
-    except ModbusError as e:
-        return {"ok": True, "ms": int((time.time() - t0) * 1000),
-                "message": f"장치가 응답했습니다. (0번 주소 읽기는 거부됨: {e})"}
+        client.read(*probe)
+        return {"ok": True, "ms": int((time.time() - t0) * 1000), "message": "연결되었습니다.", **_trace(client)}
+    except (ModbusError, XgtPlcError) as e:
+        return {"ok": True, "ms": int((time.time() - t0) * 1000), **_trace(client),
+                "message": f"장치가 응답했습니다. ({probe_name} 읽기는 거부됨: {e})"}
     except Exception as e:
-        return {"ok": False, "message": explain(e)}
+        return {"ok": False, "message": explain(e, driver), **_trace(client)}
     finally:
         client.close()
 
@@ -279,8 +301,9 @@ def test_tag(body):
     dev = ST.cfg["devices"].get(spec.get("device"))
     if dev is None:
         raise ApiError("장치를 선택하세요")
+    driver = dev.get("driver", "modbus_tcp")
     try:
-        tag = Tag("test", spec)
+        tag = Tag("test", spec, driver)
     except (KeyError, ValueError, TypeError) as e:
         raise ApiError(f"변수 설정 오류: {e}")
     client = make_client(dev)
@@ -292,11 +315,14 @@ def test_tag(body):
         if tag.valid and not (tag.valid[0] <= val <= tag.valid[1]):
             q = "RANGE"
         return {"ok": True, "raw": [int(x) for x in raw], "value": num(val), "quality": q,
-                "ms": int((time.time() - t0) * 1000)}
+                "ms": int((time.time() - t0) * 1000), **_trace(client)}
     except Exception as e:
-        return {"ok": False, "message": explain(e)}
+        return {"ok": False, "message": explain(e, driver), **_trace(client)}
     finally:
         client.close()
+
+
+_XGT_AREA_RE = re.compile(r"^[A-Z]X?$")      # 워드: D, M ... / 비트: DX, MX ...
 
 
 def scan(body):
@@ -304,23 +330,32 @@ def scan(body):
     dev = ST.cfg["devices"].get(body.get("device"))
     if dev is None:
         raise ApiError("장치를 선택하세요")
-    area = body.get("area", "holding")
-    if area not in ("coil", "discrete", "input", "holding"):
-        raise ApiError("영역이 올바르지 않습니다")
+    driver = dev.get("driver", "modbus_tcp")
+    xgt = driver == "xgt"
+    area = body.get("area", "D" if xgt else "holding")
+    if xgt:
+        area = str(area).upper()
+        if not _XGT_AREA_RE.match(area):
+            raise ApiError("영역이 올바르지 않습니다 (예: D, M 은 워드 / DX, MX 는 비트)")
+        is_bit, max_start = area.endswith("X"), 262143
+    else:
+        if area not in ("coil", "discrete", "input", "holding"):
+            raise ApiError("영역이 올바르지 않습니다")
+        is_bit, max_start = area in BIT_AREAS, 65535
     try:
         start, count = int(body.get("start", 0)), int(body.get("count", 10))
     except (TypeError, ValueError):
         raise ApiError("시작 주소/개수는 숫자로 입력하세요")
-    if not (0 <= start <= 65535) or not (1 <= count <= (200 if area in BIT_AREAS else 100)):
-        raise ApiError("시작 주소는 0~65535, 개수는 레지스터 100개 / 비트 200개까지 가능합니다")
+    if not (0 <= start <= max_start) or not (1 <= count <= (200 if is_bit else 100)):
+        raise ApiError(f"시작 주소는 0~{max_start}, 개수는 워드(레지스터) 100개 / 비트 200개까지 가능합니다")
     client = make_client(dev)
     try:
         vals = client.read(area, start, count)
     except Exception as e:
-        return {"ok": False, "message": explain(e)}
+        return {"ok": False, "message": explain(e, driver), **_trace(client)}
     finally:
         client.close()
-    if area in BIT_AREAS:
+    if is_bit:
         return {"ok": True, "bits": True, "rows": [{"addr": start + i, "value": int(v)} for i, v in enumerate(vals)]}
     rows = []
     for i, v in enumerate(vals):
@@ -328,6 +363,7 @@ def scan(body):
         if i + 1 < len(vals):
             hi, lo = v, vals[i + 1]
             row["u32"] = (hi << 16) | lo
+            row["u32_little"] = (lo << 16) | hi
             row["f32_big"] = num(struct.unpack(">f", struct.pack(">HH", hi, lo))[0])
             row["f32_little"] = num(struct.unpack(">f", struct.pack(">HH", lo, hi))[0])
         rows.append(row)

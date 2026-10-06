@@ -34,6 +34,10 @@ def _recv_exact(sock, n):
     return buf
 
 
+def _hex(b):
+    return " ".join(f"{x:02X}" for x in b)
+
+
 # --------------------------------------------------------------------------
 # 클라이언트
 # --------------------------------------------------------------------------
@@ -43,6 +47,15 @@ class ModbusTcpClient:
         self._sock = None
         self._tid = 0
         self._lock = threading.Lock()
+        self.trace = {"tx": "", "rx": ""}      # 마지막 송수신 프레임(16진수), 문제 진단용
+
+    @staticmethod
+    def is_bit(area):
+        return area in ("coil", "discrete")
+
+    def limits(self, area, cfg_gap):
+        """(허용 간격, 한 번에 묶을 최대 개수)"""
+        return cfg_gap, (1000 if self.is_bit(area) else 120)
 
     def connect(self):
         self.close()
@@ -63,6 +76,7 @@ class ModbusTcpClient:
                 self.connect()
             self._tid = (self._tid + 1) & 0xFFFF
             req = struct.pack(">HHHB", self._tid, 0, len(pdu) + 1, self.unit) + pdu
+            self.trace = {"tx": _hex(req), "rx": ""}
             try:
                 self._sock.sendall(req)
                 hdr = _recv_exact(self._sock, 7)
@@ -71,6 +85,7 @@ class ModbusTcpClient:
             except OSError:
                 self.close()
                 raise
+            self.trace["rx"] = _hex(hdr + body)
             if tid != self._tid:
                 self.close()
                 raise ModbusError("트랜잭션 ID 불일치")
@@ -95,17 +110,19 @@ class ModbusTcpClient:
 # --------------------------------------------------------------------------
 class DataStore:
     def __init__(self):
-        self.d = {a: {} for a in FUNC_CODE}
+        self.d = {}                      # 영역 이름 -> {주소: 값}  (Modbus 4영역, XGT 'D'/'MX' 등)
         self.lock = threading.Lock()
 
     def get(self, area, addr, count):
         with self.lock:
-            return [self.d[area].get(addr + i, 0) for i in range(count)]
+            mem = self.d.get(area, {})
+            return [mem.get(addr + i, 0) for i in range(count)]
 
     def set(self, area, addr, values):
         with self.lock:
+            mem = self.d.setdefault(area, {})
             for i, v in enumerate(values):
-                self.d[area][addr + i] = v
+                mem[addr + i] = v
 
 
 class _Handler(socketserver.BaseRequestHandler):

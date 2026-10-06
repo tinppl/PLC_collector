@@ -1,57 +1,237 @@
 {
-  "_comment": "devices=어디서 / tags=무엇을 / jobs=언제·어떻게. 실기기 연결 시 host/port를 바꾸고 'sim' 항목은 지우세요.",
-
+  "_comment": "devices=어디서 / tags=무엇을 / jobs=언제·어떻게. plc1은 LS XGT 전용 프로토콜, ADAM·FC-5000은 Modbus TCP 예시입니다. 실제 장치 연결 시 host/port를 바꾸고 'sim' 항목은 지우세요.",
   "devices": {
-    "plc1":     {"driver": "modbus_tcp", "host": "127.0.0.1", "port": 5021, "unit": 1, "sim": true},
-    "adam6017": {"driver": "modbus_tcp", "host": "127.0.0.1", "port": 5022, "unit": 1, "sim": true},
-    "fc5000":   {"driver": "modbus_tcp", "host": "127.0.0.1", "port": 5023, "unit": 1, "sim": true}
+    "plc1": {
+      "driver": "xgt",
+      "host": "127.0.0.1",
+      "port": 5021,
+      "position": 0,
+      "sim": true
+    },
+    "adam6017": {
+      "driver": "modbus_tcp",
+      "host": "127.0.0.1",
+      "port": 5022,
+      "unit": 1,
+      "sim": true
+    },
+    "fc5000": {
+      "driver": "modbus_tcp",
+      "host": "127.0.0.1",
+      "port": 5023,
+      "unit": 1,
+      "sim": true
+    }
   },
-
   "tags": {
-    "cycle_start":   {"device": "plc1", "address": "00001", "sim": {"kind": "pulse", "period_s": 20, "at_s": 0,  "width_s": 1}},
-    "pour":          {"device": "plc1", "address": "00002", "sim": {"kind": "pulse", "period_s": 20, "at_s": 2,  "width_s": 1}},
-    "cooling_on":    {"device": "plc1", "address": "00003", "sim": {"kind": "pulse", "period_s": 20, "at_s": 4,  "width_s": 1}},
-    "mold_open":     {"device": "plc1", "address": "00004", "sim": {"kind": "pulse", "period_s": 20, "at_s": 10, "width_s": 1}},
-    "product_eject": {"device": "plc1", "address": "00005", "sim": {"kind": "pulse", "period_s": 20, "at_s": 14, "width_s": 1}},
-    "cycle_end":     {"device": "plc1", "address": "00006", "sim": {"kind": "pulse", "period_s": 20, "at_s": 18, "width_s": 1}},
-
-    "molten_temp":   {"device": "adam6017", "address": "40001", "linear": [0, 65535, 0, 1600], "unit": "C", "valid": [0, 1700],
-                      "sim": {"kind": "wave", "min": 1450, "max": 1520, "period_s": 20, "noise": 3}},
-    "mold_temp":     {"device": "adam6017", "address": "40002", "linear": [0, 65535, 0, 500],  "unit": "C", "valid": [0, 600],
-                      "sim": {"kind": "wave", "min": 250, "max": 320, "period_s": 20, "noise": 2}},
-    "product_temp":  {"device": "adam6017", "address": "40003", "linear": [0, 65535, 0, 1000], "unit": "C", "valid": [0, 1100],
-                      "sim": {"kind": "wave", "min": 850, "max": 950, "period_s": 20, "noise": 3}},
-
-    "flow":          {"device": "fc5000", "address": "40001", "type": "f32", "unit": "L/min",
-                      "sim": {"kind": "wave", "min": 70, "max": 95, "period_s": 10, "noise": 1}},
-    "flow_total":    {"device": "fc5000", "address": "40003", "type": "f32", "unit": "L",
-                      "sim": {"kind": "ramp", "start": 1250, "rate_per_s": 1.9}}
+    "cycle_start": {
+      "device": "plc1",
+      "address": "%MX0",
+      "sim": {
+        "kind": "pulse",
+        "period_s": 20,
+        "at_s": 0,
+        "width_s": 1
+      }
+    },
+    "pour": {
+      "device": "plc1",
+      "address": "%MX1",
+      "sim": {
+        "kind": "pulse",
+        "period_s": 20,
+        "at_s": 2,
+        "width_s": 1
+      }
+    },
+    "cooling_on": {
+      "device": "plc1",
+      "address": "%MX2",
+      "sim": {
+        "kind": "pulse",
+        "period_s": 20,
+        "at_s": 4,
+        "width_s": 1
+      }
+    },
+    "mold_open": {
+      "device": "plc1",
+      "address": "%MX3",
+      "sim": {
+        "kind": "pulse",
+        "period_s": 20,
+        "at_s": 10,
+        "width_s": 1
+      }
+    },
+    "product_eject": {
+      "device": "plc1",
+      "address": "%MX4",
+      "sim": {
+        "kind": "pulse",
+        "period_s": 20,
+        "at_s": 14,
+        "width_s": 1
+      }
+    },
+    "cycle_end": {
+      "device": "plc1",
+      "address": "%MX5",
+      "sim": {
+        "kind": "pulse",
+        "period_s": 20,
+        "at_s": 18,
+        "width_s": 1
+      }
+    },
+    "molten_temp": {
+      "device": "adam6017",
+      "address": "40001",
+      "linear": [0, 65535, 0, 1600],
+      "unit": "C",
+      "valid": [0, 1700],
+      "sim": {
+        "kind": "wave",
+        "min": 1450,
+        "max": 1520,
+        "period_s": 20,
+        "noise": 3
+      }
+    },
+    "mold_temp": {
+      "device": "adam6017",
+      "address": "40002",
+      "linear": [0, 65535, 0, 500],
+      "unit": "C",
+      "valid": [0, 600],
+      "sim": {
+        "kind": "wave",
+        "min": 250,
+        "max": 320,
+        "period_s": 20,
+        "noise": 2
+      }
+    },
+    "product_temp": {
+      "device": "adam6017",
+      "address": "40003",
+      "linear": [0, 65535, 0, 1000],
+      "unit": "C",
+      "valid": [0, 1100],
+      "sim": {
+        "kind": "wave",
+        "min": 850,
+        "max": 950,
+        "period_s": 20,
+        "noise": 3
+      }
+    },
+    "flow": {
+      "device": "fc5000",
+      "address": "40001",
+      "type": "f32",
+      "unit": "L/min",
+      "sim": {
+        "kind": "wave",
+        "min": 70,
+        "max": 95,
+        "period_s": 10,
+        "noise": 1
+      }
+    },
+    "flow_total": {
+      "device": "fc5000",
+      "address": "40003",
+      "type": "f32",
+      "unit": "L",
+      "sim": {
+        "kind": "ramp",
+        "start": 1250,
+        "rate_per_s": 1.9
+      }
+    },
+    "cycle_count": {
+      "device": "plc1",
+      "address": "%DW100",
+      "type": "u16",
+      "unit": "회",
+      "sim": {
+        "kind": "ramp",
+        "start": 0,
+        "rate_per_s": 0.05
+      }
+    },
+    "setpoint_temp": {
+      "device": "plc1",
+      "address": "%DW200",
+      "type": "f32",
+      "unit": "C",
+      "sim": {
+        "kind": "const",
+        "value": 1500.0
+      }
+    }
   },
-
   "jobs": {
     "monitor": {
-      "type": "interval", "period_ms": 1000,
+      "type": "interval",
+      "period_ms": 1000,
       "tags": ["molten_temp", "mold_temp", "product_temp", "flow", "flow_total"]
     },
-
     "process_events": {
-      "type": "event", "poll_ms": 100,
+      "type": "event",
+      "poll_ms": 100,
       "events": [
-        {"name": "pour",          "tag": "pour",          "edge": "rising", "snapshot": ["molten_temp"]},
-        {"name": "mold_open",     "tag": "mold_open",     "edge": "rising", "snapshot": ["mold_temp"]},
-        {"name": "product_eject", "tag": "product_eject", "edge": "rising", "snapshot": ["product_temp"]}
+        {
+          "name": "pour",
+          "tag": "pour",
+          "edge": "rising",
+          "snapshot": ["molten_temp"]
+        },
+        {
+          "name": "mold_open",
+          "tag": "mold_open",
+          "edge": "rising",
+          "snapshot": ["mold_temp"]
+        },
+        {
+          "name": "product_eject",
+          "tag": "product_eject",
+          "edge": "rising",
+          "snapshot": ["product_temp"]
+        }
       ]
     },
-
     "casting_cycle": {
-      "type": "cycle", "poll_ms": 100,
-      "start": {"tag": "cycle_start", "edge": "rising"},
-      "end":   {"tag": "cycle_end",   "edge": "rising"},
-      "diff":  {"coolant_volume": "flow_total"},
+      "type": "cycle",
+      "poll_ms": 100,
+      "start": {
+        "tag": "cycle_start",
+        "edge": "rising"
+      },
+      "end": {
+        "tag": "cycle_end",
+        "edge": "rising"
+      },
+      "diff": {
+        "coolant_volume": "flow_total"
+      },
       "events": [
-        {"name": "pour",          "tag": "pour",          "snapshot": ["molten_temp"]},
-        {"name": "mold_open",     "tag": "mold_open",     "snapshot": ["mold_temp"]},
-        {"name": "product_eject", "tag": "product_eject", "snapshot": ["product_temp"]}
+        {
+          "name": "pour",
+          "tag": "pour",
+          "snapshot": ["molten_temp"]
+        },
+        {
+          "name": "mold_open",
+          "tag": "mold_open",
+          "snapshot": ["mold_temp"]
+        },
+        {
+          "name": "product_eject",
+          "tag": "product_eject",
+          "snapshot": ["product_temp"]
+        }
       ]
     }
   }

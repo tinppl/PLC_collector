@@ -13,7 +13,6 @@ import sys
 import threading
 
 from engine import ConfigError, Reader, load_config, log, run_jobs
-from tagcodec import BIT_AREAS
 
 
 def cmd_sim(cfg, args):
@@ -37,8 +36,9 @@ def cmd_test(cfg, args):
         v = "-" if r.value is None else (int(r.value) if isinstance(r.value, bool) else f"{r.value:.4g}")
         print(f"{n:<16}{t.device:<14}{t.area + '/' + str(t.address):<14}{t.dtype:<6}{v:>14}  {t.unit:<6}{r.quality}")
     if any(r.quality == "COMM" for r in res.values()):
-        print("\n[COMM] 통신 실패 원인 점검: IP/포트, 방화벽, 국번(unit), 주소 범위, 장치의 Modbus 활성화 여부")
-        print("       (ADAM은 Modbus/TCP 포트 502, LS PLC는 Modbus 서버 설정/주소 매핑 필요)")
+        print("\n[COMM] 통신 실패 원인 점검: IP/포트, 방화벽, 주소 범위")
+        print("       Modbus 장치: 국번(unit), 장치의 Modbus 활성화 여부 (ADAM은 포트 502)")
+        print("       LS XGT 장치: 포트 2004, XG5000 통신 설정의 전용 서비스(XGT 서버) 사용 여부, 변수 이름(%DW100 등)")
         print("마지막 오류:", getattr(reader, "last_error", "-"))
     reader.close()
 
@@ -56,7 +56,7 @@ def cmd_scan(cfg, args):
         return
     finally:
         client.close()
-    if args.area in BIT_AREAS:
+    if client.is_bit(args.area):
         for i, v in enumerate(vals):
             print(f"{args.area}[{args.start + i}] = {int(v)}")
         return
@@ -94,7 +94,7 @@ def main():
     ap.add_argument("--duration", type=float, help="자동 종료까지 시간(초). 기본: Ctrl+C까지")
     ap.add_argument("--out", default="output", help="CSV 저장 폴더")
     ap.add_argument("--device", help="scan 대상 device")
-    ap.add_argument("--area", default="holding", choices=["coil", "discrete", "input", "holding"])
+    ap.add_argument("--area", default="holding", help="scan 영역. Modbus: coil/discrete/input/holding, XGT: D, M 등 (비트는 DX, MX)")
     ap.add_argument("--start", type=int, default=0)
     ap.add_argument("--count", type=int, default=10)
     args = ap.parse_args()

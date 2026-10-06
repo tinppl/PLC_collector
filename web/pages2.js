@@ -280,41 +280,71 @@
   // ======================================================================
   // 주소 탐색
   // ======================================================================
+  // LS XGT 영역 (워드: D, M ... / 비트: DX, MX ...)
+  const XGT_WORD_AREAS = { D: 'D 데이터 레지스터', M: 'M 내부 릴레이', K: 'K 킵 릴레이', L: 'L 링크 릴레이', F: 'F 특수 릴레이', P: 'P 입출력', R: 'R 파일 레지스터', T: 'T 타이머', C: 'C 카운터' };
+  const XGT_BIT_AREAS = { MX: 'M 내부 릴레이 (비트)', KX: 'K 킵 릴레이 (비트)', LX: 'L 링크 릴레이 (비트)', FX: 'F 특수 릴레이 (비트)', PX: 'P 입출력 (비트)', DX: 'D 데이터 레지스터 (비트)' };
+  const drvOf = (dev) => (S.cfg.devices[dev] || {}).driver || 'modbus_tcp';
+  // 읽은 주소를 변수 등록창에 넘길 때의 표기
+  function regAddr(driver, area, addr) {
+    if (driver !== 'xgt') return addr;
+    return area.endsWith('X') ? `%${area}${addr}` : `%${area}W${addr}`;
+  }
+
   P.scan = function (root) {
     root.append(pageHead('주소 탐색', '장치의 주소 범위를 그대로 읽어 값을 확인합니다. 어떤 주소에 무슨 값이 있는지, 32비트 값의 워드 순서가 맞는지 찾을 때 씁니다.'));
     const devs = Object.keys(S.cfg.devices);
     if (!devs.length) { root.append(panel(null, empty('먼저 장치를 등록하세요', null, btn('장치 등록하기', { kind: 'primary', onclick: () => { location.hash = '#/devices'; } })))); return; }
     const f = {
       device: h('select', null, devs.map(d => h('option', { value: d }, d))),
-      area: h('select', null, Object.entries(AREA_LABEL).map(([k, v]) => h('option', { value: k }, v))),
+      area: h('select'),
       start: h('input', { type: 'number', min: 0, max: 65535, value: 0 }),
       count: h('input', { type: 'number', min: 1, max: 100, value: 10 })
     };
+    const note = h('p', { class: 'hint' });
+    // 장치 종류에 맞게 영역 목록과 안내 문구를 바꾼다
+    function syncDevice() {
+      const xgt = drvOf(f.device.value) === 'xgt';
+      const opts = xgt
+        ? [...Object.entries(XGT_WORD_AREAS).map(([k, v]) => [k, v + ' (워드)']), ...Object.entries(XGT_BIT_AREAS)]
+        : Object.entries(AREA_LABEL);
+      f.area.replaceChildren(...opts.map(([k, v]) => h('option', { value: k }, v)));
+      f.start.max = xgt ? 262143 : 65535;
+      note.textContent = xgt
+        ? '비트 영역(MX 등)의 번호는 %MX10 처럼 비트 순번 그대로입니다. 워드 영역은 %DW100 의 100 에 해당합니다. LS PLC는 32비트 값이 하위 워드부터 저장되므로 "하위 워드 먼저" 열이 상식에 맞는 숫자인지 확인하세요.'
+        : '';
+    }
+    f.device.addEventListener('change', syncDevice);
+    syncDevice();
     const out = h('div');
     const go = btn('읽기', { kind: 'primary', icon: 'eye', onclick: run });
     root.append(panel(null, h('div', null,
-      h('div', { class: 'row' }, field('장치', f.device), field('영역', f.area), field('시작 주소 (0부터)', f.start), field('개수 (최대 100)', f.count)), go)), out);
+      h('div', { class: 'row' }, field('장치', f.device), field('영역', f.area), field('시작 주소 (0부터)', f.start), field('개수 (최대 100)', f.count)), note, go)), out);
     async function run() {
       go.disabled = true; out.replaceChildren(h('p', { class: 'hint' }, '읽는 중…'));
+      const dev = f.device.value, area = f.area.value, drv = drvOf(dev);
+      const reg = (addr, type) => PC.openTag(null, { device: dev, address: regAddr(drv, area, addr), area, type });
       try {
-        const r = await api('POST', '/api/scan', { device: f.device.value, area: f.area.value, start: Number(f.start.value), count: Number(f.count.value) });
+        const r = await api('POST', '/api/scan', { device: dev, area, start: Number(f.start.value), count: Number(f.count.value) });
         out.replaceChildren();
-        if (!r.ok) { out.append(h('div', { class: 'result-box bad' }, r.message)); }
+        if (!r.ok) { out.append(h('div', { class: 'result-box bad' }, r.message, PC.frameView(r))); }
         else if (r.bits) {
           out.append(panel('읽은 결과', h('table', { class: 'tbl' }, h('thead', null, h('tr', null, h('th', null, '주소'), h('th', null, '값'), h('th', null, ''))),
             h('tbody', null, r.rows.map(x => h('tr', null, h('td', { class: 'mono' }, String(x.addr)), h('td', null, x.value ? badge('ON', 'ok') : badge('OFF', 'mute')),
-              h('td', { class: 'act' }, btn('변수로 등록', { size: 'sm', onclick: () => PC.openTag(null, { device: f.device.value, address: x.addr, area: f.area.value, type: 'bool' }) })))))), { flush: true }));
+              h('td', { class: 'act' }, btn('변수로 등록', { size: 'sm', onclick: () => reg(x.addr, 'bool') })))))), { flush: true }));
         } else {
+          const xgt = drv === 'xgt';
+          const heads = ['주소', '정수(0~65535)', '정수(음수 포함)', '16진수', '32비트 정수(상위 워드 먼저)', '32비트 정수(하위 워드 먼저)', '실수(상위 워드 먼저)', '실수(하위 워드 먼저)', ''];
           out.append(panel('읽은 결과', h('div', { class: 'scroll-x' }, h('table', { class: 'tbl' },
-            h('thead', null, h('tr', null, ['주소', '정수(0~65535)', '정수(음수 포함)', '16진수', '32비트 정수', '실수(상위 워드 먼저)', '실수(하위 워드 먼저)', ''].map((t, i) => h('th', { class: i > 0 && i < 7 ? 'num' : '' }, t)))),
+            h('thead', null, h('tr', null, heads.map((t, i) => h('th', { class: i > 0 && i < 8 ? 'num' : '' }, t)))),
             h('tbody', null, r.rows.map(x => h('tr', null,
               h('td', { class: 'mono' }, String(x.addr)), h('td', { class: 'num' }, String(x.u16)), h('td', { class: 'num' }, String(x.i16)), h('td', { class: 'num mono' }, x.hex),
               h('td', { class: 'num dim' }, x.u32 === undefined ? '' : String(x.u32)),
+              h('td', { class: 'num dim' }, x.u32_little === undefined ? '' : String(x.u32_little)),
               h('td', { class: 'num' }, x.f32_big === undefined ? '' : fmtVal(x.f32_big)), h('td', { class: 'num' }, x.f32_little === undefined ? '' : fmtVal(x.f32_little)),
               h('td', { class: 'act' },
-                btn('정수로', { size: 'sm', onclick: () => PC.openTag(null, { device: f.device.value, address: x.addr, area: f.area.value, type: 'u16' }) }),
-                x.f32_big === undefined ? null : btn('실수로', { size: 'sm', onclick: () => PC.openTag(null, { device: f.device.value, address: x.addr, area: f.area.value, type: 'f32' }) }))))))), { flush: true }),
-            h('p', { class: 'hint' }, '실수 값은 두 개의 연속된 주소를 합쳐 읽습니다. 상식에 맞는 숫자가 나오는 쪽이 올바른 워드 순서입니다. 값이 없는 주소는 0으로 보입니다.'));
+                btn('정수로', { size: 'sm', onclick: () => reg(x.addr, 'u16') }),
+                x.f32_big === undefined ? null : btn('실수로', { size: 'sm', onclick: () => reg(x.addr, 'f32') }))))))), { flush: true }),
+            h('p', { class: 'hint' }, '실수·32비트 값은 두 개의 연속된 주소를 합쳐 읽습니다. 상식에 맞는 숫자가 나오는 쪽이 올바른 워드 순서입니다.' + (xgt ? ' LS PLC는 보통 "하위 워드 먼저"입니다.' : '') + ' 값이 없는 주소는 0으로 보입니다.'));
         }
       } catch (e) { out.replaceChildren(h('div', { class: 'result-box bad' }, e.message)); }
       go.disabled = false;
