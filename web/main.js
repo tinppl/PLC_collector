@@ -5,7 +5,7 @@
 
   const ROUTES = [
     ['', '대시보드', 'dashboard'], ['devices', '장치', 'devices'], ['tags', '변수', 'tags'],
-    ['jobs', '수집 작업', 'jobs'], ['files', '결과 파일', 'files'], ['scan', '주소 탐색', 'scan']
+    ['jobs', '수집 작업', 'jobs'], ['files', '결과 파일', 'files'], ['scan', '주소 탐색', 'scan'], ['faults', '장애 재현', 'faults']
   ];
   PC.statusListeners = new Set();
   let cleanup = null;

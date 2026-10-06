@@ -6,8 +6,10 @@
 import socket
 import os
 import socketserver
+import random
 import struct
 import threading
+import time
 
 FUNC_CODE = {"coil": 1, "discrete": 2, "holding": 3, "input": 4}
 _FC_TO_AREA = {1: "coil", 2: "discrete", 3: "holding", 4: "input"}
@@ -126,20 +128,42 @@ class DataStore:
 
 
 class _Handler(socketserver.BaseRequestHandler):
+    """가상 서버 처리부. self.server.fault(이름) 이 None 이 아니면 해당 장애가 켜진 상태다.
+
+    응답 없음 장애는 '응답을 보내지 않고 다음 요청을 기다리는' 방식이다.
+    클라이언트가 시간 초과로 연결을 닫으면 이 처리부도 자연스럽게 끝난다.
+    """
+
     def handle(self):
-        sock, store = self.request, self.server.store
+        sock, store, fault = self.request, self.server.store, self.server.fault
         try:
+            if fault("conn_drop") is not None:          # P6: 연결을 받자마자 닫음
+                return
             while True:
                 hdr = _recv_exact(sock, 7)
                 tid, _pid, length, unit = struct.unpack(">HHHB", hdr)
                 pdu = _recv_exact(sock, length - 1)
-                resp = self._process(pdu, store)
+                if fault("conn_drop") is not None:      # P6: 이미 연결된 상태에서 장애 시작
+                    return
+                if fault("gateway_off") is not None:    # P1: 연결은 되지만 응답 없음
+                    continue
+                p = fault("unit_wrong")                 # P2: 실제 국번과 다르면 응답 없음
+                if p is not None and unit != int(p["unit"]):
+                    continue
+                p = fault("unstable")                   # P5: 지연 + 간헐적 무응답
+                if p is not None:
+                    if random.random() * 100 < p["drop_pct"]:
+                        continue
+                    time.sleep(p["delay_ms"] / 1000.0)
+                p = fault("addr_offset")                # P3: 값이 문서 주소보다 N칸 뒤에 있음
+                off = int(p["offset"]) if p is not None else 0
+                resp = self._process(pdu, store, off)
                 sock.sendall(struct.pack(">HHHB", tid, 0, len(resp) + 1, unit) + resp)
         except OSError:
             return
 
     @staticmethod
-    def _process(pdu, store):
+    def _process(pdu, store, off=0):
         fc = pdu[0]
         try:
             if fc in (1, 2, 3, 4):
@@ -147,7 +171,7 @@ class _Handler(socketserver.BaseRequestHandler):
                 is_bit = fc in (1, 2)
                 if count < 1 or count > (2000 if is_bit else 125):
                     return bytes([fc | 0x80, 3])
-                vals = store.get(_FC_TO_AREA[fc], addr, count)
+                vals = store.get(_FC_TO_AREA[fc], addr - off, count)
                 if is_bit:
                     nb = (count + 7) // 8
                     data = bytearray(nb)
@@ -176,6 +200,7 @@ class ModbusTcpServer(socketserver.ThreadingTCPServer):
     def __init__(self, addr, store):
         super().__init__(addr, _Handler)
         self.store = store
+        self.fault = lambda name: None      # 시뮬레이터가 장애 조회 함수로 교체한다
 
     def start(self):
         t = threading.Thread(target=self.serve_forever, daemon=True)

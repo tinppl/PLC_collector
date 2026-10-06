@@ -1079,3 +1079,17 @@ input[type="radio"] {
     transition: none !important;
   }
 }
+
+/* ---------- 장애 재현 ---------- */
+.fault-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 16px;
+  align-items: start;
+}
+.fault-grid .panel {
+  margin-bottom: 0;
+}
+.fault-card.on {
+  border-color: var(--bad);
+}

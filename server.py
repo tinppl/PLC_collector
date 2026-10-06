@@ -30,7 +30,7 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 import engine
 from engine import ConfigError, Reader, Runner, build_config, make_client
 from modbus_tcp import ModbusError
-from simulator import Simulator
+from simulator import FAULT_DEFS, Simulator
 from tagcodec import BIT_AREAS, Tag
 from xgt import XgtError, XgtPlcError
 
@@ -243,6 +243,31 @@ class State:
                 engine.log("데모 장치 중지")
                 self.sim = None
 
+    # ---- 장애 재현 ----
+    def faults_info(self):
+        with self.lock:
+            sim = self.sim if (self.sim and self.sim.running) else None
+            return {"defs": FAULT_DEFS, "running": sim is not None,
+                    "devices": sim.fault_devices() if sim else [],
+                    "state": sim.faults.snapshot() if sim else {}}
+
+    def fault_control(self, body):
+        with self.lock:
+            sim = self.sim if (self.sim and self.sim.running) else None
+            if sim is None:
+                raise ApiError("데모 장치가 꺼져 있습니다. 먼저 데모 장치를 켜세요.", 409)
+            dev, fid = body.get("device"), body.get("id")
+            try:
+                if body.get("action"):
+                    sim.run_action(dev, fid)
+                    engine.log(f"[장애 재현] {dev}: {fid} 실행")
+                else:
+                    on = bool(body.get("on"))
+                    sim.set_fault(dev, fid, on, body.get("params"))
+                    engine.log(f"[장애 재현] {dev}: {fid} " + ("켜짐" if on else "꺼짐"))
+            except ValueError as e:
+                raise ApiError(str(e))
+
     def shutdown(self):
         try:
             self.stop()
@@ -453,6 +478,11 @@ def api(method, path, query, body):
         return {"ok": True}
     if method == "POST" and path == "/api/sim":
         ST.set_sim(bool((body or {}).get("on")))
+        return {"ok": True}
+    if method == "GET" and path == "/api/sim/faults":
+        return ST.faults_info()
+    if method == "POST" and path == "/api/sim/faults":
+        ST.fault_control(body or {})
         return {"ok": True}
     if method == "POST" and path == "/api/device/test":
         return test_device((body or {}).get("device") or {})

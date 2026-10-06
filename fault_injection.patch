@@ -1,0 +1,489 @@
+diff --git a/modbus_tcp.py b/modbus_tcp.py
+index 3f09b23..b1d65dd 100644
+--- a/modbus_tcp.py
++++ b/modbus_tcp.py
+@@ -6,8 +6,10 @@
+ import socket
+ import os
+ import socketserver
++import random
+ import struct
+ import threading
++import time
+ 
+ FUNC_CODE = {"coil": 1, "discrete": 2, "holding": 3, "input": 4}
+ _FC_TO_AREA = {1: "coil", 2: "discrete", 3: "holding", 4: "input"}
+@@ -126,20 +128,42 @@ class DataStore:
+ 
+ 
+ class _Handler(socketserver.BaseRequestHandler):
++    """가상 서버 처리부. self.server.fault(이름) 이 None 이 아니면 해당 장애가 켜진 상태다.
++
++    응답 없음 장애는 '응답을 보내지 않고 다음 요청을 기다리는' 방식이다.
++    클라이언트가 시간 초과로 연결을 닫으면 이 처리부도 자연스럽게 끝난다.
++    """
++
+     def handle(self):
+-        sock, store = self.request, self.server.store
++        sock, store, fault = self.request, self.server.store, self.server.fault
+         try:
++            if fault("conn_drop") is not None:          # P6: 연결을 받자마자 닫음
++                return
+             while True:
+                 hdr = _recv_exact(sock, 7)
+                 tid, _pid, length, unit = struct.unpack(">HHHB", hdr)
+                 pdu = _recv_exact(sock, length - 1)
+-                resp = self._process(pdu, store)
++                if fault("conn_drop") is not None:      # P6: 이미 연결된 상태에서 장애 시작
++                    return
++                if fault("gateway_off") is not None:    # P1: 연결은 되지만 응답 없음
++                    continue
++                p = fault("unit_wrong")                 # P2: 실제 국번과 다르면 응답 없음
++                if p is not None and unit != int(p["unit"]):
++                    continue
++                p = fault("unstable")                   # P5: 지연 + 간헐적 무응답
++                if p is not None:
++                    if random.random() * 100 < p["drop_pct"]:
++                        continue
++                    time.sleep(p["delay_ms"] / 1000.0)
++                p = fault("addr_offset")                # P3: 값이 문서 주소보다 N칸 뒤에 있음
++                off = int(p["offset"]) if p is not None else 0
++                resp = self._process(pdu, store, off)
+                 sock.sendall(struct.pack(">HHHB", tid, 0, len(resp) + 1, unit) + resp)
+         except OSError:
+             return
+ 
+     @staticmethod
+-    def _process(pdu, store):
++    def _process(pdu, store, off=0):
+         fc = pdu[0]
+         try:
+             if fc in (1, 2, 3, 4):
+@@ -147,7 +171,7 @@ class _Handler(socketserver.BaseRequestHandler):
+                 is_bit = fc in (1, 2)
+                 if count < 1 or count > (2000 if is_bit else 125):
+                     return bytes([fc | 0x80, 3])
+-                vals = store.get(_FC_TO_AREA[fc], addr, count)
++                vals = store.get(_FC_TO_AREA[fc], addr - off, count)
+                 if is_bit:
+                     nb = (count + 7) // 8
+                     data = bytearray(nb)
+@@ -176,6 +200,7 @@ class ModbusTcpServer(socketserver.ThreadingTCPServer):
+     def __init__(self, addr, store):
+         super().__init__(addr, _Handler)
+         self.store = store
++        self.fault = lambda name: None      # 시뮬레이터가 장애 조회 함수로 교체한다
+ 
+     def start(self):
+         t = threading.Thread(target=self.serve_forever, daemon=True)
+diff --git a/server.py b/server.py
+index 5dd8220..58c3d7f 100644
+--- a/server.py
++++ b/server.py
+@@ -30,7 +30,7 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
+ import engine
+ from engine import ConfigError, Reader, Runner, build_config, make_client
+ from modbus_tcp import ModbusError
+-from simulator import Simulator
++from simulator import FAULT_DEFS, Simulator
+ from tagcodec import BIT_AREAS, Tag
+ from xgt import XgtError, XgtPlcError
+ 
+@@ -243,6 +243,31 @@ class State:
+                 engine.log("데모 장치 중지")
+                 self.sim = None
+ 
++    # ---- 장애 재현 ----
++    def faults_info(self):
++        with self.lock:
++            sim = self.sim if (self.sim and self.sim.running) else None
++            return {"defs": FAULT_DEFS, "running": sim is not None,
++                    "devices": sim.fault_devices() if sim else [],
++                    "state": sim.faults.snapshot() if sim else {}}
++
++    def fault_control(self, body):
++        with self.lock:
++            sim = self.sim if (self.sim and self.sim.running) else None
++            if sim is None:
++                raise ApiError("데모 장치가 꺼져 있습니다. 먼저 데모 장치를 켜세요.", 409)
++            dev, fid = body.get("device"), body.get("id")
++            try:
++                if body.get("action"):
++                    sim.run_action(dev, fid)
++                    engine.log(f"[장애 재현] {dev}: {fid} 실행")
++                else:
++                    on = bool(body.get("on"))
++                    sim.set_fault(dev, fid, on, body.get("params"))
++                    engine.log(f"[장애 재현] {dev}: {fid} " + ("켜짐" if on else "꺼짐"))
++            except ValueError as e:
++                raise ApiError(str(e))
++
+     def shutdown(self):
+         try:
+             self.stop()
+@@ -454,6 +479,11 @@ def api(method, path, query, body):
+     if method == "POST" and path == "/api/sim":
+         ST.set_sim(bool((body or {}).get("on")))
+         return {"ok": True}
++    if method == "GET" and path == "/api/sim/faults":
++        return ST.faults_info()
++    if method == "POST" and path == "/api/sim/faults":
++        ST.fault_control(body or {})
++        return {"ok": True}
+     if method == "POST" and path == "/api/device/test":
+         return test_device((body or {}).get("device") or {})
+     if method == "POST" and path == "/api/tag/test":
+diff --git a/simulator.py b/simulator.py
+index aadb6be..828e9c7 100644
+--- a/simulator.py
++++ b/simulator.py
+@@ -15,6 +15,95 @@ from modbus_tcp import DataStore, ModbusTcpServer
+ from xgt import XgtServer
+ 
+ 
++# ----------------------------------------------------------------------
++# 장애 재현 (ADAM-4571 + FC-5000 구간에서 실기기 연결 때 겪을 문제를 미리 겪어 보기 위한 스위치)
++#   kind: toggle(켜고 끄기) / timed(지정한 시간 동안만 켜짐) / action(한 번 실행)
++#   주의: 실제 장비가 오류를 어떤 형태로 돌려주는지는 추정이다 (예: 무응답인지 예외 응답인지)
++# ----------------------------------------------------------------------
++FAULT_DEFS = [
++    {"id": "gateway_off", "code": "P1", "kind": "toggle", "params": [],
++     "title": "게이트웨이 모드 꺼짐",
++     "desc": "TCP 연결은 되지만 읽기 요청에 응답이 없습니다. (4571이 Modbus TCP↔RTU 변환 모드가 아닐 때)"},
++    {"id": "unit_wrong", "code": "P2", "kind": "toggle",
++     "params": [{"key": "unit", "label": "실제 국번", "default": 2, "min": 0, "max": 247}],
++     "title": "국번(Unit ID) 불일치",
++     "desc": "설정한 국번과 다른 국번으로 요청하면 응답이 없습니다. (FC-5000의 실제 국번이 다를 때)"},
++    {"id": "addr_offset", "code": "P3", "kind": "toggle",
++     "params": [{"key": "offset", "label": "어긋남(칸)", "default": 1, "min": -8, "max": 8}],
++     "title": "주소 어긋남",
++     "desc": "값이 문서 주소보다 N칸 뒤에 있습니다. 주소 탐색으로 오프셋을 찾아야 합니다."},
++    {"id": "word_swap", "code": "P4", "kind": "toggle", "params": [],
++     "title": "32비트 워드 순서 반대",
++     "desc": "float 값의 상위·하위 워드가 뒤바뀌어 엉뚱한 값이 읽힙니다."},
++    {"id": "unstable", "code": "P5", "kind": "toggle",
++     "params": [{"key": "delay_ms", "label": "응답 지연(ms)", "default": 1000, "min": 0, "max": 10000},
++                {"key": "drop_pct", "label": "무응답 확률(%)", "default": 20, "min": 0, "max": 100}],
++     "title": "응답 지연 · 간헐적 시간 초과",
++     "desc": "응답이 느리고 가끔 아예 오지 않습니다. 수집기 시간 초과 기본값은 2초입니다."},
++    {"id": "conn_drop", "code": "P6", "kind": "timed",
++     "params": [{"key": "seconds", "label": "지속 시간(초)", "default": 30, "min": 1, "max": 600}],
++     "title": "연결 끊김 후 복구",
++     "desc": "연결을 받자마자 닫는 상태가 지정한 시간 동안 이어진 뒤 자동으로 복귀합니다."},
++    {"id": "total_reset", "code": "P7", "kind": "action", "params": [],
++     "title": "적산값 리셋",
++     "desc": "누를 때마다 적산값(Total)이 0으로 돌아간 뒤 다시 증가합니다."},
++    {"id": "total_freeze", "code": "P8", "kind": "toggle", "params": [],
++     "title": "적산값 정지",
++     "desc": "적산값이 변하지 않습니다. 해제하면 멈춘 값에서 이어서 증가합니다."},
++]
++_FAULT_BY_ID = {d["id"]: d for d in FAULT_DEFS}
++
++
++class FaultBoard:
++    """장치별로 켜진 장애를 보관한다. 서버 스레드와 화면 요청이 함께 접근하므로 잠금을 쓴다."""
++
++    def __init__(self):
++        self._lock = threading.Lock()
++        self._st = {}       # (장치, 장애 id) -> {"params": {...}, "until": 종료 시각 또는 None}
++
++    def set(self, device, fid, on, params=None):
++        d = _FAULT_BY_ID.get(fid)
++        if d is None or d["kind"] == "action":
++            raise ValueError(f"켜고 끌 수 없는 장애입니다: {fid}")
++        with self._lock:
++            if not on:
++                self._st.pop((device, fid), None)
++                return
++            p = {"on": True}
++            for spec in d["params"]:
++                v = (params or {}).get(spec["key"], spec["default"])
++                try:
++                    v = float(v)
++                except (TypeError, ValueError):
++                    raise ValueError(f"{spec['label']}에는 숫자를 입력하세요")
++                p[spec["key"]] = max(spec["min"], min(spec["max"], v))
++            until = time.time() + p["seconds"] if d["kind"] == "timed" else None
++            self._st[(device, fid)] = {"params": p, "until": until}
++
++    def get(self, device, fid):
++        """켜져 있으면 파라미터 dict(항상 비어 있지 않음), 아니면 None"""
++        with self._lock:
++            s = self._st.get((device, fid))
++            if s is None:
++                return None
++            if s["until"] is not None and time.time() >= s["until"]:
++                del self._st[(device, fid)]
++                return None
++            return s["params"]
++
++    def snapshot(self):
++        now, out = time.time(), {}
++        with self._lock:
++            for (dev, fid), s in list(self._st.items()):
++                if s["until"] is not None and now >= s["until"]:
++                    del self._st[(dev, fid)]
++                    continue
++                out.setdefault(dev, {})[fid] = {
++                    "params": {k: v for k, v in s["params"].items() if k != "on"},
++                    "remaining_s": None if s["until"] is None else round(s["until"] - now, 1)}
++        return out
++
++
+ def sim_value(spec, t):
+     kind = spec.get("kind", "const")
+     if kind == "pulse":
+@@ -30,7 +119,7 @@ def sim_value(spec, t):
+     return spec.get("value", 0)
+ 
+ 
+-def _write_tag(store, tag, value):
++def _write_tag(store, tag, value, swap=False):
+     if tag.is_bit:
+         store.set(tag.area, tag.address, [bool(value)])
+     elif tag.dtype == "bool" and tag.bit is not None:
+@@ -38,7 +127,10 @@ def _write_tag(store, tag, value):
+         mask = 1 << int(tag.bit)
+         store.set(tag.area, tag.address, [(cur | mask) if value else (cur & ~mask)])
+     else:
+-        store.set(tag.area, tag.address, tag.encode(value))
++        words = tag.encode(value)
++        if swap and len(words) == 2:        # P4: 32비트 값의 워드 순서를 뒤집어 저장
++            words = words[::-1]
++        store.set(tag.area, tag.address, words)
+ 
+ 
+ class Simulator:
+@@ -49,6 +141,10 @@ class Simulator:
+         self.stores, self.servers = {}, []
+         self.stop_ev = threading.Event()
+         self.thread = None
++        self.faults = FaultBoard()
++        self.t0 = None
++        self._shift = {}        # 태그 이름 -> 적산값에서 빼는 양 (P7 리셋, P8 정지 해제 때 갱신)
++        self._frozen = {}       # 태그 이름 -> 정지된 값 (P8)
+ 
+     @property
+     def running(self):
+@@ -69,6 +165,8 @@ class Simulator:
+                 self.stop()
+                 raise RuntimeError(f"데모 장치 '{dname}'의 포트 {port}를 열 수 없습니다. "
+                                    f"이미 실행 중이거나 다른 프로그램이 사용 중일 수 있습니다. ({e})")
++            if not xgt:
++                srv.fault = (lambda name, _d=dname: self.faults.get(_d, name))
+             srv.start()
+             self.servers.append(srv)
+             self.stores[dname] = store
+@@ -76,18 +174,57 @@ class Simulator:
+         if not self.stores:
+             raise RuntimeError("설정에 데모(sim) 장치가 없습니다")
+         self.stop_ev.clear()
++        self.t0 = time.time()
+         self.thread = threading.Thread(target=self._loop, daemon=True)
+         self.thread.start()
+ 
++    def _value(self, tag, t):
++        """태그의 현재 값. 적산(ramp) 태그는 리셋·정지 장애를 반영한다."""
++        v = sim_value(tag.sim, t)
++        if tag.sim.get("kind") != "ramp":
++            return v
++        key = tag.name
++        v -= self._shift.get(key, 0.0)
++        if self.faults.get(tag.device, "total_freeze") is not None:        # P8
++            return self._frozen.setdefault(key, v)
++        if key in self._frozen:                    # 정지 해제: 멈춘 값에서 이어서 증가
++            frozen = self._frozen.pop(key)
++            self._shift[key] = self._shift.get(key, 0.0) + (v - frozen)
++            return frozen
++        return v
++
+     def _loop(self):
+         tags = [t for t in self.cfg["_tags"].values() if t.sim and t.device in self.stores]
+-        t0 = time.time()
+         while not self.stop_ev.is_set():
+-            t = time.time() - t0
++            t = time.time() - self.t0
+             for tag in tags:
+-                _write_tag(self.stores[tag.device], tag, sim_value(tag.sim, t))
++                swap = self.faults.get(tag.device, "word_swap") is not None   # P4
++                _write_tag(self.stores[tag.device], tag, self._value(tag, t), swap)
+             self.stop_ev.wait(0.05)
+ 
++    # ---- 장애 제어 (웹 화면/API에서 호출) ----
++    def fault_devices(self):
++        """장애를 걸 수 있는 장치(Modbus 가상 장치)"""
++        return [n for n, s in self.cfg["devices"].items()
++                if s.get("sim") and s.get("driver") != "xgt" and n in self.stores]
++
++    def set_fault(self, device, fid, on, params=None):
++        if device not in self.fault_devices():
++            raise ValueError(f"장애를 걸 수 없는 장치입니다: {device}")
++        self.faults.set(device, fid, on, params)
++
++    def run_action(self, device, fid):
++        if device not in self.fault_devices():
++            raise ValueError(f"장애를 걸 수 없는 장치입니다: {device}")
++        if fid != "total_reset":
++            raise ValueError(f"실행할 수 없는 동작입니다: {fid}")
++        t = time.time() - self.t0
++        for tag in self.cfg["_tags"].values():
++            if tag.device == device and tag.sim and tag.sim.get("kind") == "ramp":
++                self._shift[tag.name] = sim_value(tag.sim, t)       # 지금 값이 0이 되도록
++                if tag.name in self._frozen:
++                    self._frozen[tag.name] = 0.0
++
+     def stop(self):
+         self.stop_ev.set()
+         if self.thread:
+diff --git a/web/app.css b/web/app.css
+index 90ae453..2d315f6 100644
+--- a/web/app.css
++++ b/web/app.css
+@@ -1079,3 +1079,17 @@ input[type="radio"] {
+     transition: none !important;
+   }
+ }
++
++/* ---------- 장애 재현 ---------- */
++.fault-grid {
++  display: grid;
++  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
++  gap: 16px;
++  align-items: start;
++}
++.fault-grid .panel {
++  margin-bottom: 0;
++}
++.fault-card.on {
++  border-color: var(--bad);
++}
+diff --git a/web/index.html b/web/index.html
+index 17ece53..83e2e8b 100644
+--- a/web/index.html
++++ b/web/index.html
+@@ -33,6 +33,7 @@
+ <script src="/ui.js"></script>
+ <script src="/pages1.js"></script>
+ <script src="/pages2.js"></script>
++<script src="/pages3.js"></script>
+ <script src="/main.js"></script>
+ </body>
+ </html>
+diff --git a/web/main.js b/web/main.js
+index 5745deb..d63fb60 100644
+--- a/web/main.js
++++ b/web/main.js
+@@ -5,7 +5,7 @@
+ 
+   const ROUTES = [
+     ['', '대시보드', 'dashboard'], ['devices', '장치', 'devices'], ['tags', '변수', 'tags'],
+-    ['jobs', '수집 작업', 'jobs'], ['files', '결과 파일', 'files'], ['scan', '주소 탐색', 'scan']
++    ['jobs', '수집 작업', 'jobs'], ['files', '결과 파일', 'files'], ['scan', '주소 탐색', 'scan'], ['faults', '장애 재현', 'faults']
+   ];
+   PC.statusListeners = new Set();
+   let cleanup = null;
+diff --git a/web/pages3.js b/web/pages3.js
+new file mode 100644
+index 0000000..a041c0f
+--- /dev/null
++++ b/web/pages3.js
+@@ -0,0 +1,99 @@
++'use strict';
++/* 페이지: 장애 재현 (가상 장치에 일부러 문제를 일으켜 수집기 반응을 확인) */
++(function () {
++  const { h, icon, btn, badge, api, toast, pageHead, panel, empty, field } = PC;
++  const P = (window.PAGES = window.PAGES || {});
++
++  P.faults = function (root) {
++    root.append(pageHead('장애 재현',
++      '가상 장치에 실기기에서 겪을 만한 문제를 일으킵니다. 켠 상태에서 수집을 돌려 CSV·로그에 어떻게 기록되는지 확인하세요.'));
++    const body = h('div');
++    root.append(body);
++
++    let info = null;          // 서버가 알려 준 장애 목록·상태
++    let device = null;        // 선택한 장치
++    const drafts = {};        // 장애 id -> 입력 중인 파라미터 (자동 갱신 때 입력값이 지워지지 않게 보관)
++    let alive = true;
++    let busy = false;
++
++    async function turnSimOn() {
++      try { await api('POST', '/api/sim', { on: true }); toast('데모 장치를 켰습니다.'); await PC.pollNow(); refresh(); }
++      catch (e) { toast(e.message, 'bad'); }
++    }
++
++    async function refresh() {
++      if (!alive || busy) return;
++      try { info = await api('GET', '/api/sim/faults'); } catch (e) { return; }
++      if (!alive) return;
++      if (!info.running || !info.devices.length) {
++        body.replaceChildren(panel(null, empty(
++          info.running ? '장애를 걸 수 있는 장치가 없습니다' : '데모 장치가 꺼져 있습니다',
++          info.running ? 'Modbus TCP 데모 장치(sim)가 설정에 있어야 합니다.' : '장애 재현은 데모 장치가 켜져 있을 때만 쓸 수 있습니다.',
++          info.running ? null : btn('데모 장치 켜기', { kind: 'primary', icon: 'bolt', onclick: turnSimOn }))));
++        return;
++      }
++      if (!info.devices.includes(device)) device = info.devices.includes('fc5000') ? 'fc5000' : info.devices[0];
++      draw();
++    }
++
++    async function send(payload, okMsg) {
++      busy = true;
++      try { await api('POST', '/api/sim/faults', payload); if (okMsg) toast(okMsg); }
++      catch (e) { toast(e.message, 'bad'); }
++      busy = false;
++      refresh();
++    }
++
++    function card(d, st) {
++      const on = !!st;
++      const inputs = d.params.map(p => {
++        const cur = (drafts[d.id] || {})[p.key] ?? (st ? st.params[p.key] : p.default);
++        const el = h('input', { type: 'number', min: p.min, max: p.max, step: 'any', value: String(cur),
++          oninput: (e) => { (drafts[d.id] = drafts[d.id] || {})[p.key] = e.target.value; } });
++        return field(p.label, el);
++      });
++      const params = () => Object.fromEntries(d.params.map(p => [p.key, (drafts[d.id] || {})[p.key] ?? p.default]));
++      let action;
++      if (d.kind === 'action') {
++        action = btn('지금 실행', { icon: 'bolt', onclick: () => send({ device, id: d.id, action: true }, d.title + ' 실행') });
++      } else if (d.kind === 'timed') {
++        action = btn(on ? '지금 끄기' : '시작', { kind: on ? '' : 'primary', icon: on ? 'stop' : 'play',
++          onclick: () => send({ device, id: d.id, on: !on, params: params() }) });
++      } else {
++        action = btn(on ? '끄기' : '켜기', { kind: on ? '' : 'primary', icon: on ? 'stop' : 'play',
++          onclick: () => send({ device, id: d.id, on: !on, params: params() }) });
++      }
++      const state = d.kind === 'action' ? null
++        : on ? badge(st.remaining_s != null ? `켜짐 · ${Math.ceil(st.remaining_s)}초 남음` : '켜짐', 'bad') : badge('꺼짐', 'mute');
++      return h('section', { class: 'panel fault-card' + (on ? ' on' : '') },
++        h('div', { class: 'panel-head' }, h('span', null, `${d.code} · ${d.title}`), h('span', { class: 'end' }, state)),
++        h('div', { class: 'panel-body' },
++          h('p', { class: 'hint', style: { marginTop: 0 } }, d.desc),
++          inputs.length ? h('div', { class: 'row tight' }, inputs) : null,
++          h('div', { style: { marginTop: '10px' } }, action)));
++    }
++
++    function draw() {
++      const sel = h('select', { onchange: (e) => { device = e.target.value; draw(); } },
++        info.devices.map(n => h('option', { value: n, selected: n === device }, n)));
++      const mine = info.state[device] || {};
++      const anyOn = Object.keys(mine).length > 0;
++      body.replaceChildren(
++        h('div', { class: 'row tight', style: { alignItems: 'flex-end', marginBottom: '8px' } },
++          field('대상 장치', sel),
++          anyOn ? btn('모두 끄기', { icon: 'stop', onclick: async () => {
++            busy = true;
++            try { for (const id of Object.keys(mine)) await api('POST', '/api/sim/faults', { device, id, on: false }); toast('모든 장애를 껐습니다.'); }
++            catch (e) { toast(e.message, 'bad'); }
++            busy = false; refresh();
++          } }) : null),
++        h('div', { class: 'banner info' }, icon('bolt'), h('span', null,
++          '실제 장비가 오류를 어떤 형태로 돌려주는지(무응답인지 예외 응답인지)는 추정입니다. 실기기에서는 반응이 다를 수 있습니다.')),
++        h('div', { class: 'fault-grid' }, info.defs.map(d => card(d, mine[d.id]))));
++    }
++
++    refresh();
++    const timer = setInterval(refresh, 1000);
++    return () => { alive = false; clearInterval(timer); };
++  };
++})();
