@@ -1593,6 +1593,31 @@
         step: "any",
         value: base.valid ? base.valid[1] : "",
       }),
+      total: h("input", { type: "checkbox", checked: !!base.total }),
+      flowTag: h(
+        "select",
+        null,
+        h("option", { value: "" }, "(사용 안 함)"),
+        Object.keys(S.cfg.tags)
+          .filter((x) => x !== name)
+          .map((x) =>
+            h("option", { value: x, selected: x === base.flow_tag }, x),
+          ),
+      ),
+      stuck: h("input", {
+        type: "number",
+        min: "0",
+        step: "any",
+        value: base.stuck_s ?? "",
+        placeholder: "5",
+      }),
+      maxRate: h("input", {
+        type: "number",
+        min: "0",
+        step: "any",
+        value: base.max_rate ?? "",
+        placeholder: "(검사 안 함)",
+      }),
     };
     f.conv.value = base.linear
       ? "linear"
@@ -1660,6 +1685,28 @@
         '정상 범위를 벗어난 값은 저장 파일에 "범위 밖" 표시가 붙습니다. 비워 두면 검사하지 않습니다.',
       ),
     );
+    const secTotal = h(
+      "div",
+      null,
+      h(
+        "label",
+        { class: "inline-check", style: { marginBottom: "8px" } },
+        f.total,
+        h("span", { style: { fontWeight: 600 } }, "적산값(누적 카운터)입니다"),
+      ),
+      h(
+        "div",
+        { class: "row" },
+        field("순간유량 변수", f.flowTag),
+        field("정지 판단(초)", f.stuck),
+        field("초당 최대 증가량", f.maxRate),
+      ),
+      h(
+        "p",
+        { class: "hint", style: { marginTop: "-6px" } },
+        "주기 수집 때 값이 줄면 \"적산 리셋\", 유량이 있는데 정지 판단 시간 넘게 그대로면 \"적산 정지\", 최대 증가량보다 빨리 늘면 \"적산 급증\" 표시가 붙습니다.",
+      ),
+    );
 
     function sync() {
       const xgt = devDriver(f.device.value) === "xgt";
@@ -1699,6 +1746,7 @@
       secBit.hidden = !(t === "bool" && !bitArea);
       secConv.hidden = t === "bool";
       secRest.hidden = t === "bool";
+      secTotal.hidden = t === "bool";
       secScale.hidden = f.conv.value !== "scale";
       secLinear.hidden = f.conv.value !== "linear";
     }
@@ -1774,6 +1822,21 @@
           return {
             err: "정상 범위는 최소와 최대를 모두 입력하거나 모두 비워 두세요.",
           };
+        if (f.total.checked) {
+          s.total = true;
+          if (f.flowTag.value) s.flow_tag = f.flowTag.value;
+          if (f.stuck.value !== "") {
+            const v = Number(f.stuck.value);
+            if (!(v > 0)) return { err: "정지 판단 시간은 0보다 큰 숫자여야 합니다." };
+            s.stuck_s = v;
+          }
+          if (f.maxRate.value !== "") {
+            const v = Number(f.maxRate.value);
+            if (!(v > 0)) return { err: "초당 최대 증가량은 0보다 큰 숫자여야 합니다." };
+            s.max_rate = v;
+          }
+          if (old && old.flow_min !== undefined) s.flow_min = old.flow_min;   // 화면에 없는 항목은 그대로 보존
+        }
       }
       return { n, s };
     }
@@ -1878,6 +1941,7 @@
         secBit,
         secConv,
         secRest,
+        secTotal,
         result,
       ],
       footer: [

@@ -10,6 +10,11 @@
   linear  : [raw_lo, raw_hi, eng_lo, eng_hi]  선형 스케일링 (4~20mA 등)
   valid   : [min, max]  범위를 벗어나면 품질 플래그 RANGE
   bit     : holding 레지스터 안의 비트 번호(0~15)를 bool로 읽을 때
+  total   : true 이면 적산값(누적 카운터)으로 보고 주기 수집 때 두 가지를 검사한다
+              - 값이 줄어들면 TOTAL_RESET
+              - flow_tag 값이 flow_min 보다 큰데 stuck_s 초 넘게 적산값이 그대로면 TOTAL_STUCK
+              - max_rate(초당 최대 증가량)를 정하면, 그보다 빨리 늘어나는 값은 TOTAL_JUMP
+  flow_tag, flow_min(기본 1), stuck_s(기본 5), max_rate(기본 없음) : 위 검사에 쓰는 기준
 
 LS XGT 전용 프로토콜 장치(driver = "xgt")의 태그
   address : "%DW100" (D 영역 워드 100번), "%MX10" (M 영역 비트 10번), "D100" (워드 단축 표기)
@@ -92,6 +97,14 @@ class Tag:
                 raise ValueError(f"{name}: linear은 [raw_lo, raw_hi, eng_lo, eng_hi] 형식이며 lo != hi 여야 합니다")
         self.valid = spec.get("valid")
         self.unit = spec.get("unit", "")
+        self.total = bool(spec.get("total"))
+        self.flow_tag = spec.get("flow_tag") or None
+        self.flow_min = float(spec.get("flow_min", 1))
+        self.stuck_s = float(spec.get("stuck_s", 5))
+        mr = spec.get("max_rate")
+        self.max_rate = float(mr) if mr not in (None, "") else None
+        if self.total and self.stuck_s <= 0:
+            raise ValueError(f"{name}: stuck_s는 0보다 커야 합니다")
         self.sim = spec.get("sim")
 
     # ----- 스케일링 -----

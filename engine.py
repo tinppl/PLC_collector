@@ -123,6 +123,9 @@ def build_config(raw):
         except (KeyError, ValueError, TypeError) as e:
             raise ConfigError(f"변수 '{n}' 설정 오류: {e}")
     cfg["_tags"] = tags
+    for n, t in tags.items():
+        if t.total and t.flow_tag and t.flow_tag not in tags:
+            raise ConfigError(f"변수 '{n}': flow_tag '{t.flow_tag}'가 등록되어 있지 않습니다")
     for n, s in cfg["jobs"].items():
         if s.get("type") not in ("interval", "event", "cycle"):
             raise ConfigError(f"작업 '{n}': 종류는 interval/event/cycle 중 하나여야 합니다")
@@ -233,6 +236,59 @@ def quality_str(readings):
     return "OK" if not bad else ";".join(bad)
 
 
+class TotalWatch:
+    """적산값 태그 하나를 지켜보며 이상 표시(TOTAL_RESET / TOTAL_STUCK / TOTAL_JUMP)를 돌려준다.
+
+    - 통신 실패나 RANGE(범위 밖) 값은 판단 기준으로 쓰지 않는다. 쓰레기 값이 기준이 되면
+      그 뒤의 정상 값이 오히려 이상으로 보이기 때문이다. 마지막 정상 값은 계속 기억하므로
+      통신이 끊긴 사이에 리셋되어도 복구 후 첫 정상 행에서 잡힌다.
+    - TOTAL_JUMP는 증가 속도가 max_rate를 넘을 때다. 같은 수준의 값이 JUMP_ACCEPT번
+      이어지면 값이 실제로 바뀐 것으로 보고 새 기준으로 삼는다(행에는 계속 표시).
+    """
+    JUMP_ACCEPT = 3
+
+    def __init__(self, tag):
+        self.tag = tag
+        self.last = None          # 마지막으로 받아들인 값
+        self.last_t = None        # 그 시각
+        self.still_since = None   # 유량이 있는데 값이 그대로이기 시작한 시각
+        self.jumps = 0
+
+    def check(self, readings, now):
+        r = readings.get(self.tag.name)
+        if r is None or r.value is None or r.quality != "OK":
+            return None
+        v, flags, tag = r.value, [], self.tag
+        eps = max(1e-6, abs(self.last or 0.0) * 1e-9)
+        accept = True
+        if self.last is not None:
+            if v < self.last - eps:
+                flags.append("TOTAL_RESET")
+                self.still_since = None
+                self.jumps = 0
+            elif tag.max_rate is not None and v - self.last > tag.max_rate * max(now - self.last_t, 1.0):
+                flags.append("TOTAL_JUMP")
+                self.still_since = None
+                self.jumps += 1
+                accept = self.jumps >= self.JUMP_ACCEPT
+            else:
+                self.jumps = 0
+                if abs(v - self.last) <= eps:
+                    fr = readings.get(tag.flow_tag) if tag.flow_tag else None
+                    if fr is not None and fr.value is not None and fr.quality != "COMM" and fr.value > tag.flow_min:
+                        if self.still_since is None:
+                            self.still_since = now
+                        elif now - self.still_since >= tag.stuck_s:
+                            flags.append("TOTAL_STUCK")
+                    else:
+                        self.still_since = None     # 유량이 없으면 안 변하는 게 정상
+                else:
+                    self.still_since = None
+        if accept:
+            self.last, self.last_t = v, now
+        return flags
+
+
 class Edge:
     def __init__(self):
         self.prev = None
@@ -327,13 +383,27 @@ class IntervalJob(BaseJob):
         self.tags = self.spec["tags"]
         self.period = (self.override_ms or self.spec["period_ms"]) / 1000.0
         self._open(["time"] + self.tags + ["quality"])
+        tags = self.reader.tags
+        self.watch = [TotalWatch(tags[t]) for t in self.tags if tags[t].total]
+        # 정지 검사에 쓰는 유량 변수는 작업의 저장 항목이 아니어도 함께 읽는다
+        self.read_names = _uniq(self.tags + [w.tag.flow_tag for w in self.watch if w.tag.flow_tag])
 
     def loop(self):
         for _ in self.ticks(self.period):
-            r = self.reader.read(self.tags)
+            r_all = self.reader.read(self.read_names)
+            r = {t: r_all[t] for t in self.tags}
             self.comm_watch(r)
             row = {"time": datetime.now().isoformat(timespec="milliseconds"),
                    "quality": quality_str(r)}
+            now = time.monotonic()
+            extra = []
+            for w in self.watch:
+                for f in w.check(r_all, now) or []:
+                    extra.append(f"{w.tag.name}:{f}")
+            if extra:
+                row["quality"] = ";".join(([] if row["quality"] == "OK" else [row["quality"]]) + extra)
+                for e in extra:
+                    log(f"[{self.jname}] {e} 감지")
             row.update({t: r[t].value for t in self.tags})
             self.write(row)
             if INTERVAL_LOG:

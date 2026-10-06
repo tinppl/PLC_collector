@@ -131,6 +131,7 @@
       "address": "40001",
       "type": "f32",
       "unit": "L/min",
+      "valid": [0, 300],
       "sim": {
         "kind": "wave",
         "min": 70,
@@ -144,6 +145,11 @@
       "address": "40003",
       "type": "f32",
       "unit": "L",
+      "valid": [0, 100000000],
+      "total": true,
+      "flow_tag": "flow",
+      "stuck_s": 5,
+      "max_rate": 20,
       "sim": {
         "kind": "ramp",
         "start": 1250,

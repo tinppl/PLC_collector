@@ -1,0 +1,261 @@
+diff --git a/config.example.json b/config.example.json
+index 16aebfc..d3165e7 100644
+--- a/config.example.json
++++ b/config.example.json
+@@ -131,6 +131,7 @@
+       "address": "40001",
+       "type": "f32",
+       "unit": "L/min",
++      "valid": [0, 300],
+       "sim": {
+         "kind": "wave",
+         "min": 70,
+@@ -144,6 +145,11 @@
+       "address": "40003",
+       "type": "f32",
+       "unit": "L",
++      "valid": [0, 100000000],
++      "total": true,
++      "flow_tag": "flow",
++      "stuck_s": 5,
++      "max_rate": 20,
+       "sim": {
+         "kind": "ramp",
+         "start": 1250,
+diff --git a/engine.py b/engine.py
+index e319797..b9baf51 100644
+--- a/engine.py
++++ b/engine.py
+@@ -123,6 +123,9 @@ def build_config(raw):
+         except (KeyError, ValueError, TypeError) as e:
+             raise ConfigError(f"변수 '{n}' 설정 오류: {e}")
+     cfg["_tags"] = tags
++    for n, t in tags.items():
++        if t.total and t.flow_tag and t.flow_tag not in tags:
++            raise ConfigError(f"변수 '{n}': flow_tag '{t.flow_tag}'가 등록되어 있지 않습니다")
+     for n, s in cfg["jobs"].items():
+         if s.get("type") not in ("interval", "event", "cycle"):
+             raise ConfigError(f"작업 '{n}': 종류는 interval/event/cycle 중 하나여야 합니다")
+@@ -233,6 +236,59 @@ def quality_str(readings):
+     return "OK" if not bad else ";".join(bad)
+ 
+ 
++class TotalWatch:
++    """적산값 태그 하나를 지켜보며 이상 표시(TOTAL_RESET / TOTAL_STUCK / TOTAL_JUMP)를 돌려준다.
++
++    - 통신 실패나 RANGE(범위 밖) 값은 판단 기준으로 쓰지 않는다. 쓰레기 값이 기준이 되면
++      그 뒤의 정상 값이 오히려 이상으로 보이기 때문이다. 마지막 정상 값은 계속 기억하므로
++      통신이 끊긴 사이에 리셋되어도 복구 후 첫 정상 행에서 잡힌다.
++    - TOTAL_JUMP는 증가 속도가 max_rate를 넘을 때다. 같은 수준의 값이 JUMP_ACCEPT번
++      이어지면 값이 실제로 바뀐 것으로 보고 새 기준으로 삼는다(행에는 계속 표시).
++    """
++    JUMP_ACCEPT = 3
++
++    def __init__(self, tag):
++        self.tag = tag
++        self.last = None          # 마지막으로 받아들인 값
++        self.last_t = None        # 그 시각
++        self.still_since = None   # 유량이 있는데 값이 그대로이기 시작한 시각
++        self.jumps = 0
++
++    def check(self, readings, now):
++        r = readings.get(self.tag.name)
++        if r is None or r.value is None or r.quality != "OK":
++            return None
++        v, flags, tag = r.value, [], self.tag
++        eps = max(1e-6, abs(self.last or 0.0) * 1e-9)
++        accept = True
++        if self.last is not None:
++            if v < self.last - eps:
++                flags.append("TOTAL_RESET")
++                self.still_since = None
++                self.jumps = 0
++            elif tag.max_rate is not None and v - self.last > tag.max_rate * max(now - self.last_t, 1.0):
++                flags.append("TOTAL_JUMP")
++                self.still_since = None
++                self.jumps += 1
++                accept = self.jumps >= self.JUMP_ACCEPT
++            else:
++                self.jumps = 0
++                if abs(v - self.last) <= eps:
++                    fr = readings.get(tag.flow_tag) if tag.flow_tag else None
++                    if fr is not None and fr.value is not None and fr.quality != "COMM" and fr.value > tag.flow_min:
++                        if self.still_since is None:
++                            self.still_since = now
++                        elif now - self.still_since >= tag.stuck_s:
++                            flags.append("TOTAL_STUCK")
++                    else:
++                        self.still_since = None     # 유량이 없으면 안 변하는 게 정상
++                else:
++                    self.still_since = None
++        if accept:
++            self.last, self.last_t = v, now
++        return flags
++
++
+ class Edge:
+     def __init__(self):
+         self.prev = None
+@@ -327,13 +383,27 @@ class IntervalJob(BaseJob):
+         self.tags = self.spec["tags"]
+         self.period = (self.override_ms or self.spec["period_ms"]) / 1000.0
+         self._open(["time"] + self.tags + ["quality"])
++        tags = self.reader.tags
++        self.watch = [TotalWatch(tags[t]) for t in self.tags if tags[t].total]
++        # 정지 검사에 쓰는 유량 변수는 작업의 저장 항목이 아니어도 함께 읽는다
++        self.read_names = _uniq(self.tags + [w.tag.flow_tag for w in self.watch if w.tag.flow_tag])
+ 
+     def loop(self):
+         for _ in self.ticks(self.period):
+-            r = self.reader.read(self.tags)
++            r_all = self.reader.read(self.read_names)
++            r = {t: r_all[t] for t in self.tags}
+             self.comm_watch(r)
+             row = {"time": datetime.now().isoformat(timespec="milliseconds"),
+                    "quality": quality_str(r)}
++            now = time.monotonic()
++            extra = []
++            for w in self.watch:
++                for f in w.check(r_all, now) or []:
++                    extra.append(f"{w.tag.name}:{f}")
++            if extra:
++                row["quality"] = ";".join(([] if row["quality"] == "OK" else [row["quality"]]) + extra)
++                for e in extra:
++                    log(f"[{self.jname}] {e} 감지")
+             row.update({t: r[t].value for t in self.tags})
+             self.write(row)
+             if INTERVAL_LOG:
+diff --git a/tagcodec.py b/tagcodec.py
+index fe415fb..5f32b8b 100644
+--- a/tagcodec.py
++++ b/tagcodec.py
+@@ -10,6 +10,11 @@
+   linear  : [raw_lo, raw_hi, eng_lo, eng_hi]  선형 스케일링 (4~20mA 등)
+   valid   : [min, max]  범위를 벗어나면 품질 플래그 RANGE
+   bit     : holding 레지스터 안의 비트 번호(0~15)를 bool로 읽을 때
++  total   : true 이면 적산값(누적 카운터)으로 보고 주기 수집 때 두 가지를 검사한다
++              - 값이 줄어들면 TOTAL_RESET
++              - flow_tag 값이 flow_min 보다 큰데 stuck_s 초 넘게 적산값이 그대로면 TOTAL_STUCK
++              - max_rate(초당 최대 증가량)를 정하면, 그보다 빨리 늘어나는 값은 TOTAL_JUMP
++  flow_tag, flow_min(기본 1), stuck_s(기본 5), max_rate(기본 없음) : 위 검사에 쓰는 기준
+ 
+ LS XGT 전용 프로토콜 장치(driver = "xgt")의 태그
+   address : "%DW100" (D 영역 워드 100번), "%MX10" (M 영역 비트 10번), "D100" (워드 단축 표기)
+@@ -92,6 +97,14 @@ class Tag:
+                 raise ValueError(f"{name}: linear은 [raw_lo, raw_hi, eng_lo, eng_hi] 형식이며 lo != hi 여야 합니다")
+         self.valid = spec.get("valid")
+         self.unit = spec.get("unit", "")
++        self.total = bool(spec.get("total"))
++        self.flow_tag = spec.get("flow_tag") or None
++        self.flow_min = float(spec.get("flow_min", 1))
++        self.stuck_s = float(spec.get("stuck_s", 5))
++        mr = spec.get("max_rate")
++        self.max_rate = float(mr) if mr not in (None, "") else None
++        if self.total and self.stuck_s <= 0:
++            raise ValueError(f"{name}: stuck_s는 0보다 커야 합니다")
+         self.sim = spec.get("sim")
+ 
+     # ----- 스케일링 -----
+diff --git a/web/pages1.js b/web/pages1.js
+index 99f8bbc..a3d078f 100644
+--- a/web/pages1.js
++++ b/web/pages1.js
+@@ -1593,6 +1593,31 @@
+         step: "any",
+         value: base.valid ? base.valid[1] : "",
+       }),
++      total: h("input", { type: "checkbox", checked: !!base.total }),
++      flowTag: h(
++        "select",
++        null,
++        h("option", { value: "" }, "(사용 안 함)"),
++        Object.keys(S.cfg.tags)
++          .filter((x) => x !== name)
++          .map((x) =>
++            h("option", { value: x, selected: x === base.flow_tag }, x),
++          ),
++      ),
++      stuck: h("input", {
++        type: "number",
++        min: "0",
++        step: "any",
++        value: base.stuck_s ?? "",
++        placeholder: "5",
++      }),
++      maxRate: h("input", {
++        type: "number",
++        min: "0",
++        step: "any",
++        value: base.max_rate ?? "",
++        placeholder: "(검사 안 함)",
++      }),
+     };
+     f.conv.value = base.linear
+       ? "linear"
+@@ -1660,6 +1685,28 @@
+         '정상 범위를 벗어난 값은 저장 파일에 "범위 밖" 표시가 붙습니다. 비워 두면 검사하지 않습니다.',
+       ),
+     );
++    const secTotal = h(
++      "div",
++      null,
++      h(
++        "label",
++        { class: "inline-check", style: { marginBottom: "8px" } },
++        f.total,
++        h("span", { style: { fontWeight: 600 } }, "적산값(누적 카운터)입니다"),
++      ),
++      h(
++        "div",
++        { class: "row" },
++        field("순간유량 변수", f.flowTag),
++        field("정지 판단(초)", f.stuck),
++        field("초당 최대 증가량", f.maxRate),
++      ),
++      h(
++        "p",
++        { class: "hint", style: { marginTop: "-6px" } },
++        "주기 수집 때 값이 줄면 \"적산 리셋\", 유량이 있는데 정지 판단 시간 넘게 그대로면 \"적산 정지\", 최대 증가량보다 빨리 늘면 \"적산 급증\" 표시가 붙습니다.",
++      ),
++    );
+ 
+     function sync() {
+       const xgt = devDriver(f.device.value) === "xgt";
+@@ -1699,6 +1746,7 @@
+       secBit.hidden = !(t === "bool" && !bitArea);
+       secConv.hidden = t === "bool";
+       secRest.hidden = t === "bool";
++      secTotal.hidden = t === "bool";
+       secScale.hidden = f.conv.value !== "scale";
+       secLinear.hidden = f.conv.value !== "linear";
+     }
+@@ -1774,6 +1822,21 @@
+           return {
+             err: "정상 범위는 최소와 최대를 모두 입력하거나 모두 비워 두세요.",
+           };
++        if (f.total.checked) {
++          s.total = true;
++          if (f.flowTag.value) s.flow_tag = f.flowTag.value;
++          if (f.stuck.value !== "") {
++            const v = Number(f.stuck.value);
++            if (!(v > 0)) return { err: "정지 판단 시간은 0보다 큰 숫자여야 합니다." };
++            s.stuck_s = v;
++          }
++          if (f.maxRate.value !== "") {
++            const v = Number(f.maxRate.value);
++            if (!(v > 0)) return { err: "초당 최대 증가량은 0보다 큰 숫자여야 합니다." };
++            s.max_rate = v;
++          }
++          if (old && old.flow_min !== undefined) s.flow_min = old.flow_min;   // 화면에 없는 항목은 그대로 보존
++        }
+       }
+       return { n, s };
+     }
+@@ -1878,6 +1941,7 @@
+         secBit,
+         secConv,
+         secRest,
++        secTotal,
+         result,
+       ],
+       footer: [
