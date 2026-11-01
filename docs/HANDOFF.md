@@ -44,7 +44,9 @@ Windows Python 3.12에서 회귀 28개 통과(HTTP 파일 왕복/요청 차단 �
 
 공식 스키마 직접 다운로드는 이 PC의 Python 인증서 체인 오류로 막혔다. GitHub 커넥터로 가져온 동일 원문의 Git blob digest를 확인하고 `--schema`로 검증했다. TLS 검증을 끄지 않았다. 다른 PC의 네트워크 제한이 있으면 같은 오프라인 경로를 사용한다.
 
-첫 GitHub 실행에서 Windows/Linux × Python 3.9/3.12 회귀 4종은 모두 통과했다. 스키마 다운로드는 공유 실행 환경의 무인증 GitHub API 한도(403)에 걸려, 다운로드를 **고정 커밋 raw URL + Git blob digest 대조**로 변경했다. 따라서 API 토큰을 추가할 필요가 없다. 최종 CI 결과는 해당 브랜치의 최신 Checks 실행에서 확인한다.
+첫 GitHub 실행에서 Windows/Linux × Python 3.9/3.12 회귀 4종은 모두 통과했다. 스키마 다운로드는 공유 실행 환경의 무인증 GitHub API 한도(403)에 걸려, 다운로드를 **고정 커밋 raw URL + Git blob digest 대조**로 변경했다. 따라서 API 토큰을 추가할 필요가 없다.
+
+최종 코드 커밋 `c68268ed32ac669618a7eb91fa3082a02974fe60`은 [GitHub Checks 실행 41295880773](https://github.com/tinppl/PLC_collector/actions/runs/41295880773)에서 **5개 작업 모두 통과**했다: Windows/Linux × Python 3.9/3.12 회귀 4개와 독립 AAS 스키마 검사 1개. 이 결과를 기록한 마지막 커밋은 문서만 바꾸며 CI 재실행을 생략한다. 테스트 서버와 브라우저 탭은 종료했으므로 확인하려면 `start.bat` 또는 `python server.py`로 실행한다.
 
 Windows 관리 샌드박스에서는 소켓과 `os.replace()`가 차단될 수 있다. 실제 권한 환경에서 파일 저장/백업 검사는 통과했으므로 이를 제품 저장 실패로 오인하지 않는다. 다른 환경에서도 재검증한다. CI 통과 여부는 GitHub의 실제 결과로 확인한다.
 
