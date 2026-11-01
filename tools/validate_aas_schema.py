@@ -6,7 +6,6 @@ The default download is pinned to a Git blob. No runtime dependency is added.
 This does NOT validate IDTA submodel templates or all semantic constraints.
 """
 import argparse
-import base64
 import hashlib
 import json
 import pathlib
@@ -19,7 +18,9 @@ import aas_service as aas
 from jsonschema import Draft201909Validator
 
 BLOB = "4aaed6e9e2f00a21e6e50390fc19335250b6f7c2"
-SOURCE = "https://api.github.com/repos/admin-shell-io/aas-specs-metamodel/git/blobs/" + BLOB
+COMMIT = "ecd191273a28dd9c4e7bb75e923f0f0fe5da444e"
+# Immutable raw URL avoids the unauthenticated GitHub API's shared runner quota.
+SOURCE = "https://raw.githubusercontent.com/admin-shell-io/aas-specs-metamodel/" + COMMIT + "/schemas/json/aas.json"
 
 
 def main():
@@ -29,10 +30,10 @@ def main():
     if args.schema:
         data = args.schema.read_bytes()
     else:
-        request = Request(SOURCE, headers={"User-Agent": "PLC-Collector-schema-check", "Accept": "application/vnd.github+json"})
+        request = Request(SOURCE, headers={"User-Agent": "PLC-Collector-schema-check"})
         try:
             with urlopen(request, timeout=30) as response:
-                data = base64.b64decode(json.load(response)["content"])
+                data = response.read()
         except URLError as e:
             raise SystemExit("Could not fetch pinned schema. Use --schema with the original JSON blob on offline/corporate networks: " + str(e)) from e
     actual = hashlib.sha1(b"blob " + str(len(data)).encode() + b"\0" + data).hexdigest()
