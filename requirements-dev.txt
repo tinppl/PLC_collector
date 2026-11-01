@@ -1,0 +1,2 @@
+# Optional independent schema check; the application uses Python stdlib only.
+jsonschema==4.22.0

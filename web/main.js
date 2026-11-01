@@ -4,7 +4,7 @@
   const { h, $, icon, btn, S, api, loadCfg, toast, openModal, fmtDur, JOB_LABEL, jobSummary, empty, panel } = PC;
 
   const ROUTES = [
-    ['', '대시보드', 'dashboard'], ['devices', '장치', 'devices'], ['tags', '변수', 'tags'],
+    ['', 'AASX 스튜디오', 'studio'], ['dashboard', '대시보드', 'dashboard'], ['devices', '장치', 'devices'], ['tags', '변수', 'tags'],
     ['jobs', '수집 작업', 'jobs'], ['files', '결과 파일', 'files'], ['scan', '주소 탐색', 'scan'], ['faults', '장애 재현', 'faults']
   ];
   PC.statusListeners = new Set();
@@ -22,7 +22,7 @@
     document.querySelectorAll('#nav a').forEach(a => {
       if (a.dataset.id === r[0]) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
     });
-    document.title = (r[0] ? r[1] + ' · ' : '') + 'PLC 데이터 수집기';
+    document.title = r[1] + ' · PLC Collector';
   }
   PC.refresh = () => { const y = window.scrollY; route(); window.scrollTo(0, y); };
   window.addEventListener('hashchange', () => { route(); window.scrollTo(0, 0); });

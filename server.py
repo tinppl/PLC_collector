@@ -11,6 +11,7 @@ import base64
 import copy
 import csv
 import hmac
+import hashlib
 import json
 import mimetypes
 import os
@@ -28,13 +29,14 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
 import engine
+import aas_service as aas
 from engine import ConfigError, Reader, Runner, build_config, make_client
 from modbus_tcp import ModbusError
 from simulator import FAULT_DEFS, Simulator
 from tagcodec import BIT_AREAS, Tag
 from xgt import XgtError, XgtPlcError
 
-VERSION = "0.3"
+VERSION = "0.4"
 ROOT = os.path.dirname(os.path.abspath(__file__))
 WEB = os.path.join(ROOT, "web")
 DATA = os.path.join(ROOT, "data")
@@ -130,7 +132,7 @@ class State:
                 cfg = build_config(raw)
             except ConfigError as e:
                 raise ApiError(str(e))
-            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
             if os.path.exists(CONFIG):
                 shutil.copyfile(CONFIG, os.path.join(BACKUP, f"config_{stamp}.json"))
                 old = sorted(os.listdir(BACKUP))
@@ -456,6 +458,43 @@ def open_folder():
 
 
 def api(method, path, query, body):
+    if path.startswith("/api/aas/"):
+        body = body or {}
+        if not isinstance(body, dict):
+            raise ApiError("요청 본문은 객체 형식이어야 합니다.")
+        store = aas.ProjectStore(DATA)
+        try:
+            if method == "GET" and path == "/api/aas/project":
+                with ST.lock:
+                    return store.load()
+            if method == "PUT" and path == "/api/aas/project":
+                with ST.lock:
+                    return store.save(body.get("project"), body.get("revision"))
+            if method == "POST" and path == "/api/aas/assess":
+                return aas.assess(body.get("project"))
+            if method == "POST" and path == "/api/aas/import":
+                return aas.inspect_upload(body.get("filename"), body.get("content"))
+            if method == "POST" and path in ("/api/aas/plan", "/api/aas/apply"):
+                with ST.lock:
+                    config_sha = hashlib.sha256(json.dumps(ST.raw, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+                    plan = aas.config_plan(body.get("project"), ST.raw)
+                    plan["config_revision"] = config_sha
+                    if path == "/api/aas/plan":
+                        return plan
+                    if ST.runner and ST.runner.running:
+                        raise ApiError("수집을 중지한 뒤 설정을 적용하세요.", 409)
+                    if not plan["can_apply"]:
+                        raise ApiError("같은 설비의 설정이 이미 있습니다. 기존 장치/변수/작업 화면에서 확인하세요.", 409)
+                    if body.get("config_revision") != config_sha:
+                        raise ApiError("미리보기 이후 설정이 변경되었습니다. 적용 내용을 다시 확인하세요.", 409)
+                    merged = copy.deepcopy(ST.raw)
+                    for section, values in plan["additions"].items():
+                        merged.setdefault(section, {}).update(values)
+                    ST.save(merged)
+                    ST.add_log("AASX 매핑에서 수집 설정 추가: " + next(iter(plan["additions"]["devices"])))
+                    return {"ok": True, "summary": plan["summary"]}
+        except aas.AasError as e:
+            raise ApiError(str(e)) from e
     if method == "GET" and path == "/api/config":
         return {"devices": ST.raw.get("devices", {}), "tags": ST.raw.get("tags", {}), "jobs": ST.raw.get("jobs", {})}
     if method == "PUT" and path == "/api/config":
@@ -580,14 +619,30 @@ class Handler(BaseHTTPRequestHandler):
 
     def _api(self, method, path, query):
         body = None
-        n = int(self.headers.get("Content-Length") or 0)
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+            if n < 0:
+                raise ValueError()
+        except ValueError:
+            self.close_connection = True
+            return self._json({"error": "요청 길이가 올바르지 않습니다"}, 400)
         if n:
             if n > 5 * 1024 * 1024:
+                self.close_connection = True
                 return self._json({"error": "요청이 너무 큽니다"}, 413)
             try:
                 body = json.loads(self.rfile.read(n).decode("utf-8"))
             except Exception:
                 return self._json({"error": "요청 형식이 올바르지 않습니다"}, 400)
+        if path == "/api/aas/export" and method == "POST":
+            try:
+                if not isinstance(body, dict):
+                    raise aas.AasError("설비 정보를 입력하세요.")
+                data = aas.package(body.get("project"))
+                return self._send(200, data, "application/aas+zip",
+                                  {"Content-Disposition": 'attachment; filename="asset.aasx"'})
+            except aas.AasError as e:
+                return self._json({"error": str(e)}, 400)
         # 파일 다운로드
         m = re.match(r"^/api/files/([^/]+)/download$", path)
         if m and method == "GET":

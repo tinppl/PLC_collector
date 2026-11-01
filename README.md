@@ -1,4 +1,19 @@
-# PLC 데이터 수집기 v0.3 (웹 화면 포함)
+# PLC Collector v0.4 · AASX 스튜디오
+
+설비 정보를 입력해 AASX를 만들고, 업로드한 파일의 수집 프로필을 복원하여 기존 PLC 수집 설정으로 연결합니다. 첫 화면의 **AASX 스튜디오**에서 시작하세요.
+
+- 설비 정보 → 연결 방식 → 수집할 신호 → 검토·활용의 4단계
+- 초안 자동 저장/복원, 가상 예제, AASX 내보내기/가져오기
+- 누락 정보 점검, 조건부 장비 구성 제안, 설정 적용 미리보기
+- 기존 Modbus TCP / LS XGT 수집·연결 테스트·데모 유지
+
+현재는 **로컬 파일럿**입니다. AASX는 JSON 기반 AAS 3.x와 앱 전용 수집 프로필을 지원하며, IDTA 공식 명판 템플릿·AAS XML·실설비 검증은 후속 작업입니다. 업로드가 장치 자동 접속이나 수집 시작을 유발하지 않습니다.
+
+개발 목적·범위는 [제품 문서](docs/PRODUCT.md), 설계 이유는 [결정 기록](docs/DECISIONS.md), 다른 PC에서 이어가는 방법과 실제 상태는 [인계 문서](docs/HANDOFF.md)를 참고하세요. Codex는 저장소의 [AGENTS.md](AGENTS.md)를 읽고 이어갑니다.
+
+검사: `python -m unittest discover -s tests -v` · 선택적 공식 스키마 대조: `pip install -r requirements-dev.txt` 후 `python tools/validate_aas_schema.py`.
+
+## 기존 데이터 수집 기능 안내
 
 PLC·ADAM 같은 장치에서 값을 읽어 CSV로 저장하는 도구입니다.
 **읽을 변수, 수집 주기, 이벤트 조건을 웹 화면에서 바꿀 수 있어 코드를 고치지 않아도 됩니다.**
